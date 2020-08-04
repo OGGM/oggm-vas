@@ -1,0 +1,40 @@
+*.py[cod]
+__pycache__
+
+# asv stuff
+.asv/
+
+# PyCharm stuffs
+.idea/
+
+# coverage stuffs
+.coverage
+
+# OS generated files
+.DS_Store
+
+# Notebook stuffs
+examples/*checkpoints
+.ipynb_checkpoints
+*.nbgrader.log
+
+# Tests stuffs
+.pytest_cache
+
+# Packages
+*.egg
+*.egg-info
+eggs
+*.eggs
+
+# specific
+*.cache
+*.lock
+docs/_build
+docs/_build_html
+docs/generated
+docs/_generated
+docs/_sources
+docs/_images
+docs/.doctrees
+oggm_vas/version.py
