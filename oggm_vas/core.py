@@ -586,7 +586,7 @@ def find_start_area(gdir, year_start=1851):
                                min_hgt=h_min, max_hgt=h_max,
                                mb_model=mbmod)
 
-    def _to_minimize(area_m2_start, ref, year_start=year_start):
+    def _to_minimize(area_m2_start, ref, _year_start=year_start):
         """Initialize VAS glacier model as copy of the reference model (ref)
         and adjust the model to the given starting area (area_m2_start) and
         starting year (1851). Let the model evolve to the same year as the
@@ -596,7 +596,7 @@ def find_start_area(gdir, year_start=1851):
         ----------
         area_m2_start : float
         ref : :py:class:`oggm.VAScalingModel`
-        year_start : float, optional
+        _year_start : float, optional
              the default value is inherited from the surrounding task
 
         Returns
@@ -612,7 +612,7 @@ def find_start_area(gdir, year_start=1851):
                                    max_hgt=ref.max_hgt,
                                    mb_model=ref.mb_model)
         # scale to desired starting size
-        model_tmp.create_start_glacier(area_m2_start, year_start=year_start)
+        model_tmp.create_start_glacier(area_m2_start, year_start=_year_start)
         # run and compare, return relative error
         return np.abs(model_tmp.run_and_compare(ref))
 
@@ -647,7 +647,7 @@ class VAScalingMassBalance(MassBalanceModel):
         bias : float, optional
             set to the alternative value of the calibration bias [mm we yr-1]
             you want to use (the default is to use the calibrated value)
-            Note that this bias is *substracted* from the computed MB. Indeed:
+            Note that this bias is *subtracted* from the computed MB. Indeed:
             BIAS = MODEL_MB - REFERENCE_MB
         filename : str, optional
             set to a different BASENAME if you want to use alternative climate
@@ -742,7 +742,7 @@ class VAScalingMassBalance(MassBalanceModel):
             self.ye = self.years[-1] if ye is None else ye
 
         # compute climatological precipitation around t*
-        # needed later to estimate the volume/lenght scaling parameter
+        # needed later to estimate the volume/length scaling parameter
         t_star = gdir.read_json('vascaling_mustar')['t_star']
         mu_hp = int(cfg.PARAMS['mu_star_halfperiod'])
         yr = [t_star - mu_hp, t_star + mu_hp]
@@ -1015,7 +1015,7 @@ class RandomVASMassBalance(MassBalanceModel):
         bias : float, optional
             set to the alternative value of the calibration bias [mm we yr-1]
             you want to use (the default is to use the calibrated value)
-            Note that this bias is *substracted* from the computed MB. Indeed:
+            Note that this bias is *subtracted* from the computed MB. Indeed:
             BIAS = MODEL_MB - REFERENCE_MB.
         y0 : int, optional, default: tstar
             the year at the center of the period of interest. The default
@@ -1253,7 +1253,7 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
         to zero. Default = None
     seed : int
         seed for the random generator. If you ignore this, the runs will be
-        different each time. Setting it to a fixed seed accross glaciers can
+        different each time. Setting it to a fixed seed across glaciers can
         be usefull if you want to have the same climate years for all of them
     temperature_bias : float, optional
         add a bias to the temperature timeseries, default = None
@@ -1331,7 +1331,7 @@ class ConstantVASMassBalance(MassBalanceModel):
         bias : float, optional
             set to the alternative value of the calibration bias [mm we yr-1]
             you want to use (the default is to use the calibrated value)
-            Note that this bias is *substracted* from the computed MB. Indeed:
+            Note that this bias is *subtracted* from the computed MB. Indeed:
             BIAS = MODEL_MB - REFERENCE_MB.
         y0 : int, optional, default: tstar
             the year at the center of the period of interest. The default
@@ -1420,7 +1420,7 @@ class ConstantVASMassBalance(MassBalanceModel):
         prcp = list()
         # iterate over all months
         for i, yr in enumerate(yrs):
-            # get positive melting temperature and solid precipitaion
+            # get positive melting temperature and solid precipitation
             t, p = self.mbmod.get_monthly_climate(min_hgt, max_hgt, year=yr)
             temp.append(t)
             prcp.append(p)
@@ -1450,7 +1450,7 @@ class ConstantVASMassBalance(MassBalanceModel):
 
         """
         # extract month from year
-        _, m = utils.floatyear_to_date()
+        _, m = utils.floatyear_to_date(year)
         # sum up the mass balance over all years in climate period
         years = [utils.date_to_floatyear(yr, m) for yr in self.years]
         mb = [self.mbmod.get_annual_mb(min_hgt, max_hgt, year=yr)
@@ -1637,7 +1637,7 @@ class VAScalingModel(object):
             glacier terminus elevation at year_0 [m asl.]
         max_hgt: float
             maximal glacier surface elevation at year_0 [m asl.]
-        mb_model: :py:class:òggm.core.vascaling.VAScalingMassBalance`
+        mb_model: :py:class:`oggm.core.vascaling.VAScalingMassBalance`
             instance of mass balance model
         """
 
@@ -1933,7 +1933,7 @@ class VAScalingModel(object):
         return diag_ds
 
     def run_until_equilibrium(self, rate=0.001, ystep=5, max_ite=200):
-        """ Try to run the glacier model until an equilibirum is reached.
+        """ Try to run the glacier model until an equilibrium is reached.
         Works only with a constant mass balance model.
 
         Parameters
@@ -1997,7 +1997,7 @@ class VAScalingModel(object):
         ----------
         area_m2_start : float
             starting surface area guess [m2]
-        year_start : flaot
+        year_start : float
             corresponding starting year
         adjust_term_elev : bool, optional, default = False
 

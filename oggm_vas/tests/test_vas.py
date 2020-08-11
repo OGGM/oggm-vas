@@ -1,4 +1,4 @@
-"""Tests for the volume/area scaling model in `vascaling.py`."""
+"""Tests for the volume/area scaling model in `core.py`."""
 
 # External libs
 import numpy as np
@@ -11,19 +11,19 @@ import copy
 import unittest
 import pytest
 
-# import gis libs
-gpd = pytest.importorskip('geopandas')
-
 # import OGGM modules
 import oggm
 import oggm.cfg as cfg
 from oggm import utils
 from oggm.utils import (get_demo_file, ncDataset, md, rmsd_bc, rel_err,
                         corrcoef)
-from oggm.core import (gis, vascaling, climate, centerlines,
+from oggm.core import (gis, climate, centerlines,
                        massbalance, flowline, inversion)
 from oggm.tests.funcs import get_test_dir
+import oggm_vas as vascaling
 
+# import gis libs
+gpd = pytest.importorskip('geopandas')
 
 pytestmark = pytest.mark.test_env("vascaling")
 
@@ -44,7 +44,7 @@ class TestVAScalingModel(unittest.TestCase):
             os.makedirs(self.testdir)
         self.clean_dir()
 
-        # load default parametere file and set working directory
+        # load default parameter file and set working directory
         cfg.initialize()
         cfg.PATHS['working_dir'] = self.testdir
         # set path to GIS files
@@ -118,7 +118,7 @@ class TestVAScalingModel(unittest.TestCase):
                                              temp_anomaly=temp_anomaly)
         np.testing.assert_allclose(temp_terminus, ref_t + temp_anomaly)
 
-        # the terminus temperature must equal the input terperature
+        # the terminus temperature must equal the input temperature
         # if the gradient is zero
         for term_h in np.array([-100, 0, 100]) + ref_h:
             temp_terminus =\
