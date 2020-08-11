@@ -1,7 +1,7 @@
 """ Implementation of the 'original' volume/area scaling glacier model from
 Marzeion et. al. 2012, see http://www.the-cryosphere.net/6/1295/2012/.
 While the mass balance model is comparable to OGGMs past mass balance model,
-the 'dynamic' part does not include any ice physics but works with ares/volume
+the 'dynamic' part does not include any ice physics but works with area/volume
 and length/volume scaling instead.
 
 Author: Moritz Oberrauch
