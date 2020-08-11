@@ -112,20 +112,20 @@ class TestVAScalingModel(unittest.TestCase):
 
         # the terminus temperature must equal the input temperature
         # if terminus elevation equals reference elevation
-        temp_terminus =\
-            vascaling._compute_temp_terminus(ref_t, temp_grad, ref_hgt=ref_h,
-                                             terminus_hgt=ref_h,
-                                             temp_anomaly=temp_anomaly)
+        temp_terminus = \
+            vascaling.compute_temp_terminus(ref_t, temp_grad, ref_hgt=ref_h,
+                                            terminus_hgt=ref_h,
+                                            temp_anomaly=temp_anomaly)
         np.testing.assert_allclose(temp_terminus, ref_t + temp_anomaly)
 
         # the terminus temperature must equal the input temperature
         # if the gradient is zero
         for term_h in np.array([-100, 0, 100]) + ref_h:
-            temp_terminus =\
-                vascaling._compute_temp_terminus(ref_t, temp_grad=0,
-                                                 ref_hgt=ref_h,
-                                                 terminus_hgt=term_h,
-                                                 temp_anomaly=temp_anomaly)
+            temp_terminus = \
+                vascaling.compute_temp_terminus(ref_t, temp_grad=0,
+                                                ref_hgt=ref_h,
+                                                terminus_hgt=term_h,
+                                                temp_anomaly=temp_anomaly)
             np.testing.assert_allclose(temp_terminus, ref_t + temp_anomaly)
 
         # now test the routine with actual elevation differences
@@ -133,11 +133,11 @@ class TestVAScalingModel(unittest.TestCase):
         for h_diff in np.array([-100, 0, 100]):
             term_h = ref_h + h_diff
             temp_diff = temp_grad * h_diff
-            temp_terminus =\
-                vascaling._compute_temp_terminus(ref_t, temp_grad,
-                                                 ref_hgt=ref_h,
-                                                 terminus_hgt=term_h,
-                                                 temp_anomaly=temp_anomaly)
+            temp_terminus = \
+                vascaling.compute_temp_terminus(ref_t, temp_grad,
+                                                ref_hgt=ref_h,
+                                                terminus_hgt=term_h,
+                                                temp_anomaly=temp_anomaly)
             np.testing.assert_allclose(temp_terminus,
                                        ref_t + temp_anomaly + temp_diff)
 
@@ -181,29 +181,29 @@ class TestVAScalingModel(unittest.TestCase):
         # if the terminus temperature is below the threshold for
         # solid precipitation all fallen precipitation must be solid
         temp_terminus = ref_t * 0 + temp_all_solid
-        solid_prcp = vascaling._compute_solid_prcp(ref_p, prcp_factor, ref_hgt,
-                                                   min_hgt, max_hgt,
-                                                   temp_terminus,
-                                                   temp_all_solid, temp_grad,
-                                                   prcp_grad=0, prcp_anomaly=0)
+        solid_prcp = vascaling.compute_solid_prcp(ref_p, prcp_factor, ref_hgt,
+                                                  min_hgt, max_hgt,
+                                                  temp_terminus,
+                                                  temp_all_solid, temp_grad,
+                                                  prcp_grad=0, prcp_anomaly=0)
         np.testing.assert_allclose(solid_prcp, ref_p)
 
         # if the temperature at the maximal elevation is above the threshold
         # for solid precipitation all fallen precipitation must be liquid
         temp_terminus = ref_t + 100
-        solid_prcp = vascaling._compute_solid_prcp(ref_p, prcp_factor, ref_hgt,
-                                                   min_hgt, max_hgt,
-                                                   temp_terminus,
-                                                   temp_all_solid, temp_grad,
-                                                   prcp_grad=0, prcp_anomaly=0)
+        solid_prcp = vascaling.compute_solid_prcp(ref_p, prcp_factor, ref_hgt,
+                                                  min_hgt, max_hgt,
+                                                  temp_terminus,
+                                                  temp_all_solid, temp_grad,
+                                                  prcp_grad=0, prcp_anomaly=0)
         np.testing.assert_allclose(solid_prcp, 0)
 
         # test extreme case if max_hgt equals min_hgt
         test_p = ref_p * (ref_t <= temp_all_solid).astype(int)
-        solid_prcp = vascaling._compute_solid_prcp(ref_p, prcp_factor, ref_hgt,
-                                                   ref_hgt, ref_hgt, ref_t,
-                                                   temp_all_solid, temp_grad,
-                                                   prcp_grad=0, prcp_anomaly=0)
+        solid_prcp = vascaling.compute_solid_prcp(ref_p, prcp_factor, ref_hgt,
+                                                  ref_hgt, ref_hgt, ref_t,
+                                                  temp_all_solid, temp_grad,
+                                                  prcp_grad=0, prcp_anomaly=0)
         np.testing.assert_allclose(solid_prcp, test_p)
 
     def test_min_max_elevation(self):

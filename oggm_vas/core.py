@@ -37,8 +37,8 @@ from oggm.core.massbalance import MassBalanceModel
 log = logging.getLogger(__name__)
 
 
-def _compute_temp_terminus(temp, temp_grad, ref_hgt,
-                           terminus_hgt, temp_anomaly=0):
+def compute_temp_terminus(temp, temp_grad, ref_hgt,
+                          terminus_hgt, temp_anomaly=0):
     """Computes the (monthly) mean temperature at the glacier terminus,
     following section 2.1.2 of Marzeion et. al., 2012. The input temperature
     is scaled by the given temperature gradient and the elevation difference
@@ -67,9 +67,9 @@ def _compute_temp_terminus(temp, temp_grad, ref_hgt,
     return temp_terminus
 
 
-def _compute_solid_prcp(prcp, prcp_factor, ref_hgt, min_hgt, max_hgt,
-                        temp_terminus, temp_all_solid, temp_grad,
-                        prcp_grad=0, prcp_anomaly=0):
+def compute_solid_prcp(prcp, prcp_factor, ref_hgt, min_hgt, max_hgt,
+                       temp_terminus, temp_all_solid, temp_grad,
+                       prcp_grad=0, prcp_anomaly=0):
     """Compute the (monthly) amount of solid precipitation onto the glacier
     surface, following section 2.1.1 of Marzeion et. al., 2012. The fraction of
     solid precipitation depends mainly on the terminus temperature and the
@@ -247,14 +247,14 @@ def get_yearly_mb_temp_prcp(gdir, time_range=None, year_range=None):
     min_hgt, max_hgt = get_min_max_elevation(gdir)
 
     # get temperature at glacier terminus
-    temp_terminus = _compute_temp_terminus(itemp, igrad, ref_hgt, min_hgt)
+    temp_terminus = compute_temp_terminus(itemp, igrad, ref_hgt, min_hgt)
     # compute positive 'melting' temperature/energy input
     temp = np.clip(temp_terminus - temp_melt, a_min=0, a_max=None)
     # get solid precipitation
-    prcp_solid = _compute_solid_prcp(iprcp, prcp_fac, ref_hgt,
-                                     min_hgt, max_hgt,
-                                     temp_terminus, temp_all_solid,
-                                     igrad, prcp_grad)
+    prcp_solid = compute_solid_prcp(iprcp, prcp_fac, ref_hgt,
+                                    min_hgt, max_hgt,
+                                    temp_terminus, temp_all_solid,
+                                    igrad, prcp_grad)
 
     # check if climate data includes all 12 month of all years
     ny, r = divmod(len(time), 12)
@@ -787,15 +787,15 @@ class VAScalingMassBalance(MassBalanceModel):
         igrad = self.grad[pok]
 
         # compute terminus temperature
-        temp_terminus = _compute_temp_terminus(itemp, igrad,
-                                               self.ref_hgt, min_hgt)
+        temp_terminus = compute_temp_terminus(itemp, igrad,
+                                              self.ref_hgt, min_hgt)
         # compute positive 'melting' temperature/energy input
         temp_for_melt = np.clip(temp_terminus - self.t_melt,
                                 a_min=0, a_max=None)
         # compute solid precipitation
-        prcp_solid = _compute_solid_prcp(iprcp, 1,
-                                         self.ref_hgt, min_hgt, max_hgt,
-                                         temp_terminus, self.t_solid, igrad)
+        prcp_solid = compute_solid_prcp(iprcp, 1,
+                                        self.ref_hgt, min_hgt, max_hgt,
+                                        temp_terminus, self.t_solid, igrad)
 
         return temp_for_melt, prcp_solid
 
@@ -868,16 +868,16 @@ class VAScalingMassBalance(MassBalanceModel):
         igrad = self.grad[pok]
 
         # compute terminus temperature
-        temp_terminus = _compute_temp_terminus(itemp, igrad,
-                                               self.ref_hgt, min_hgt)
+        temp_terminus = compute_temp_terminus(itemp, igrad,
+                                              self.ref_hgt, min_hgt)
         # compute positive 'melting' temperature/energy input
         temp_for_melt = np.clip(temp_terminus - self.t_melt,
                                 a_min=0, a_max=None)
         # compute solid precipitation
         # prcp factor is set to 1 since it the time series is already corrected
-        prcp_solid = _compute_solid_prcp(iprcp, 1,
-                                         self.ref_hgt, min_hgt, max_hgt,
-                                         temp_terminus, self.t_solid, igrad)
+        prcp_solid = compute_solid_prcp(iprcp, 1,
+                                        self.ref_hgt, min_hgt, max_hgt,
+                                        temp_terminus, self.t_solid, igrad)
 
         return temp_for_melt, prcp_solid
 
