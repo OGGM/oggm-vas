@@ -749,7 +749,7 @@ class VAScalingMassBalance(MassBalanceModel):
         _, _, prcp_clim = get_yearly_mb_temp_prcp(gdir, year_range=yr)
         # convert from [mm we. yr-1] into SI units [m we. yr-1]
         prcp_clim = prcp_clim * 1e-3
-        # TODO: Marzeion limits the turnover (prcp_clim) to a minimum of 10 (unit???)
+        # Marzeion limits the turnover (prcp_clim) to a minimum of 10 mm we./yr
         self.prcp_clim = np.max([10e-3, np.mean(prcp_clim)])
 
     def get_monthly_climate(self, min_hgt, max_hgt, year):
