@@ -1034,3 +1034,14 @@ class TestVAScalingModel(unittest.TestCase):
         v_eq = model.volume_m3
         model.run_until(model.year + 100)
         assert abs(1 - (model.volume_m3/v_eq)) < 0.01
+
+        # instance a random mass balance model, centred around t*
+        mb_model = vascaling.RandomVASMassBalance(gdir)
+        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
+        model = vascaling.VAScalingModel(year_0=0, area_m2_0=gdir.rgi_area_m2,
+                                         min_hgt=min_hgt, max_hgt=max_hgt,
+                                         mb_model=mb_model)
+
+        # run glacier with random mass balance model
+        with self.assertRaises(TypeError):
+            model.run_until_equilibrium(rate=1e-4)

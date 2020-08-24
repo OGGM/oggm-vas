@@ -96,7 +96,8 @@ def compute_solid_prcp(prcp, prcp_factor, ref_hgt, min_hgt, max_hgt,
     temp_grad : netCDF4 variable or float
         temperature lapse rate [degC per m of elevation change]
     prcp_grad : netCDF4 variable or float, optional
-        precipitation lapse rate [kg/m2 per m of elevation change], default = 0
+        precipitation lapse rate [percentage of precipitation per meters of
+            elevation change], Marzeion et al. (2012) used 3%/100m, default = 0
     prcp_anomaly : netCDF4 variable or float, optional
         monthly mean precipitation anomaly [kg/m2], default = 0
 
@@ -1638,7 +1639,7 @@ class VAScalingModel(object):
             glacier terminus elevation at year_0 [m asl.]
         max_hgt: float
             maximal glacier surface elevation at year_0 [m asl.]
-        mb_model: :py:class:`oggm.core.vascaling.VAScalingMassBalance`
+        mb_model: :py:class:`oggm-vas.VAScalingMassBalance`
             instance of mass balance model
         """
 
@@ -1951,9 +1952,9 @@ class VAScalingModel(object):
 
         """
         # TODO: isinstance is not working...
-        # if not isinstance(self.mb_model, ConstantVASMassBalance):
-        #     raise TypeError('The mass balance model must be of type ' +
-        #                     'ConstantVASMassBalance.')
+        if not isinstance(self.mb_model, ConstantVASMassBalance):
+            raise TypeError('The mass balance model must be of type ' +
+                            'ConstantVASMassBalance.')
         # initialize the iteration counters and the volume change parameter
         ite = 0
         was_close_zero = 0
