@@ -2006,12 +2006,14 @@ class VAScalingModel(object):
         adjust_term_elev : bool, optional, default = False
 
         """
-        # compute volume (m3) and length (m) from area (using scaling laws)
-        volume_m3_start = self.ca * area_m2_start ** self.gamma
-        length_m_start = (volume_m3_start / self.cl) ** (1 / self.ql)
+        # get terminus elevation from current model
         min_hgt_start = self.min_hgt_0
-        # compute corresponding terminus elevation
+        # adjust terminus elevation according to new area
         if adjust_term_elev:
+            # compute volume (m3) and length (m) from area (using scaling laws)
+            volume_m3_start = self.ca * area_m2_start ** self.gamma
+            length_m_start = (volume_m3_start / self.cl) ** (1 / self.ql)
+            # compute corresponding terminus elevation
             min_hgt_start = self.max_hgt + (length_m_start / self.length_m_0
                                             * (self.min_hgt_0 - self.max_hgt))
 
