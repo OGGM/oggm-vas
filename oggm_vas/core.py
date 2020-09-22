@@ -153,6 +153,43 @@ def get_min_max_elevation(gdir):
     return min_elev, max_elev
 
 
+def get_scaling_constants(gdir, c_l=None, c_a=None):
+    """ The scaling constants (c_l and c_a for volume/length and volume/area
+    scaling respectively) are random variables and vary from glacier to
+    glacier. This function computes these constants for the given glacier,
+    based on the RGI area, the inversion volume and the flowline length.
+
+    The scaling constants are not independent of eachother. Hence, it is
+    possible to supply one scaling constant to compute the other one in a
+    congruent manner.
+
+    Parameters
+    ----------
+    gdir : :py:class:`oggm.GlacierDirectory`
+
+    Returns
+    -------
+    [float, float]
+        volume/length and volume/area scaling constants
+
+    """
+    # get glacier geometries
+    glacier_stats = utils.glacier_statistics(gdir)
+    length = glacier_stats['longuest_centerline_km'] * 1e3
+    area = glacier_stats['rgi_area_km2'] * 1e6
+    volume = glacier_stats['inv_volume_km3'] * 1e9
+    # compute scaling constants
+    if not c_l and not c_a:
+        c_l = volume / length ** cfg.PARAMS['vas_q_length']
+        c_a = volume / area ** cfg.PARAMS['vas_gamma_area']
+    elif c_l and not c_a:
+        pass
+    else:
+        pass
+
+    return c_l, c_a
+
+
 def get_yearly_mb_temp_prcp(gdir, time_range=None, year_range=None):
     """Read climate file and compute mass balance relevant climate parameters.
     Those are the positive melting temperature at glacier terminus elevation
@@ -1693,13 +1730,15 @@ class VAScalingModel(object):
                                                      self.max_hgt,
                                                      self.year)
 
-    def _compute_time_scales(self):
-        """Compute the time scales for glacier length `tau_l` and glacier
-        surface area `tau_a` for current time step. Both time scales are
-        floored at one year."""
-        self.tau_l = max(1, self.volume_m3 / (self.mb_model.prcp_clim
-                                              * self.area_m2))
-        self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
+    def _compute_time_scales(self, factor=1):
+        """Compute the time scales for glacier length `tau_l`
+        and glacier surface area `tau_a` for current time step."""
+        self.tau_l = self.volume_m3 / (self.mb_model.prcp_clim * self.area_m2)
+        self.tau_l *= factor  # scale with given factor
+        self.tau_l = max(self.tau_l, 1)
+        self.tau_a = self.tau_l * self.area_m2 / self.length_m ** 2
+        # relaxation time scale cannot be less than one year
+        self.tau_l = max(self.tau_a, 1)
 
     def reset(self):
         """Set model attributes back to starting values."""
@@ -1722,7 +1761,7 @@ class VAScalingModel(object):
         self.tau_l = 1
         pass
 
-    def step(self):
+    def step(self, time_scale_factor=1):
         """Advance model glacier by one year. This includes the following:
             - computing time scales
             - computing the specific mass balance
@@ -1801,7 +1840,8 @@ class VAScalingModel(object):
         return (self.year, self.length_m, self.area_m2,
                 self.volume_m3, self.min_hgt, self.spec_mb)
 
-    def run_until_and_store(self, year_end, diag_path=None, reset=False):
+    def run_until_and_store(self, year_end, diag_path=None, reset=False,
+                            time_scale_factor=1):
         """Runs the model till the specified year. Returns all relevant
         parameters (i.e. length, area, volume, terminus elevation and specific
         mass balance) for each time step as a xarray.Dataset. If a file path is
@@ -1920,7 +1960,7 @@ class VAScalingModel(object):
 
         # run the model
         for i, yr in enumerate(monthly_time):
-            self.run_until(yr)
+            self.run_until(yr, time_scale_factor=time_scale_factor)
             # store diagnostics
             diag_ds['volume_m3'].data[i] = self.volume_m3
             diag_ds['area_m2'].data[i] = self.area_m2
@@ -1936,8 +1976,9 @@ class VAScalingModel(object):
 
         return diag_ds
 
-    def run_until_equilibrium(self, rate=0.001, ystep=5, max_ite=200):
-        """ Try to run the glacier model until an equilibrium is reached.
+    def run_until_equilibrium(self, rate=0.001, ystep=5, max_ite=200,
+                              time_scale_factor=1):
+        """ Try to run the glacier model until an equilibirum is reached.
         Works only with a constant mass balance model.
 
         Parameters
@@ -1969,7 +2010,8 @@ class VAScalingModel(object):
             #  store current volume ('before')
             v_bef = self.volume_m3
             # run for the given number of years
-            self.run_until(self.year + ystep)
+            self.run_until(self.year + ystep,
+                           time_scale_factor=time_scale_factor)
             # store new volume ('after')
             v_af = self.volume_m3
             #
