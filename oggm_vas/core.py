@@ -18,6 +18,7 @@ import pandas as pd
 import xarray as xr
 import netCDF4
 from scipy.optimize import minimize_scalar
+from sklearn.linear_model import LinearRegression
 
 # import OGGM modules
 import oggm
@@ -26,7 +27,7 @@ from oggm.cfg import SEC_IN_YEAR, SEC_IN_MONTH
 
 from oggm import __version__
 
-from oggm import utils, entity_task, global_task
+from oggm import utils, entity_task, global_task, workflow
 from oggm.utils import floatyear_to_date, ncDataset
 from oggm.exceptions import InvalidParamsError, MassBalanceCalibrationError
 
@@ -153,41 +154,106 @@ def get_min_max_elevation(gdir):
     return min_elev, max_elev
 
 
-def get_scaling_constants(gdir, c_l=None, c_a=None):
+def get_scaling_constant(gdirs):
     """ The scaling constants (c_l and c_a for volume/length and volume/area
     scaling respectively) are random variables and vary from glacier to
-    glacier. This function computes these constants for the given glacier,
+    glacier. This function computes these constants for the given glaciers,
     based on the RGI area, the inversion volume and the flowline length.
+    Returns dictionary with parameters
 
-    The scaling constants are not independent of eachother. Hence, it is
-    possible to supply one scaling constant to compute the other one in a
-    congruent manner.
+    NOTE: The scaling constants are theoretically not independent of each other.
+    Here, the scaling constants are separately estimated via a linear
+    regression. So don't expect to get the same volume if you apply V/A scaling
+    and V/L scaling to the same glacier.
 
     Parameters
     ----------
-    gdir : :py:class:`oggm.GlacierDirectory`
+    gdirs : list of :py:class:`oggm.GlacierDirectory` objects
 
     Returns
     -------
-    [float, float]
+    {float, float}
         volume/length and volume/area scaling constants
 
     """
     # get glacier geometries
-    glacier_stats = utils.glacier_statistics(gdir)
-    length = glacier_stats['longuest_centerline_km'] * 1e3
-    area = glacier_stats['rgi_area_km2'] * 1e6
-    volume = glacier_stats['inv_volume_km3'] * 1e9
-    # compute scaling constants
-    if not c_l and not c_a:
-        c_l = volume / length ** cfg.PARAMS['vas_q_length']
-        c_a = volume / area ** cfg.PARAMS['vas_gamma_area']
-    elif c_l and not c_a:
-        pass
-    else:
-        pass
+    glacier_stats = workflow.execute_entity_task(utils.glacier_statistics,
+                                                 gdirs)
+    rgi_id = [gs.get('rgi_id', np.NaN) for gs in glacier_stats]
+    length = [gs.get('longuest_centerline_km', np.NaN) * 1e3
+              for gs in glacier_stats]
+    area = [gs.get('rgi_area_km2', np.NaN) * 1e6 for gs in glacier_stats]
+    volume = [gs.get('inv_volume_km3', np.NaN) * 1e9 for gs in glacier_stats]
+    # create DataFrame
+    df = pd.DataFrame({'length': length, 'area': area, 'volume': volume},
+                      index=pd.Index(rgi_id, name='rgi_id'))
+    # drop glaciers where one of the geometries is missing
+    df = df.dropna()
+    # linear regression in log-log space for given slope
+    c_l = np.exp(np.mean(np.log(df.volume.values)
+                         - (cfg.PARAMS['vas_q_length']
+                            * np.log(df.length.values))))
+    c_a = np.exp(np.mean(np.log(df.volume.values)
+                         - (cfg.PARAMS['vas_gamma_area']
+                            * np.log(df.area.values))))
 
-    return c_l, c_a
+    return {'c_l': c_l, 'c_a': c_a}
+
+
+def get_scaling_constant_exponent(gdirs):
+    """ Compute scaling constants and exponent from a linear regression in
+    log-log space. Returns scaling constant, scaling exponent and r squared
+    for the volume/length scaling and volume/area scaling in dictionary.
+
+    NOTE: The scaling parameters are theoretically not independent of each
+    other. Here, they are separately estimated via a linear regression. So
+    don't expect to get the same volume if you apply V/A scaling and V/L
+    scaling to the same glacier.
+
+    Parameters
+    ----------
+    gdirs : list of :py:class:`oggm.GlacierDirectory` objects
+
+    Returns
+    -------
+    [(float, float, float), (float, float, float)]
+        scaling constant, scaling exponent and r squared for the volume/length
+        scaling and volume/area scaling, respectively.
+
+
+    """
+    # get glacier geometries
+    glacier_stats = workflow.execute_entity_task(utils.glacier_statistics,
+                                                 gdirs)
+    rgi_id = [gs.get('rgi_id', np.NaN) for gs in glacier_stats]
+    length = [gs.get('longuest_centerline_km', np.NaN) * 1e3
+              for gs in glacier_stats]
+    area = [gs.get('rgi_area_km2', np.NaN) * 1e6 for gs in glacier_stats]
+    volume = [gs.get('inv_volume_km3', np.NaN) * 1e9 for gs in glacier_stats]
+    # create DataFrame
+    df = pd.DataFrame({'length': length, 'area': area, 'volume': volume},
+                      index=pd.Index(rgi_id, name='rgi_id'))
+    # drop glaciers where one of the geometries is missing
+    df = df.dropna()
+    # volume/length linear regression in log-log space
+    x = np.log(df.length.values).reshape(-1, 1)
+    y = np.log(df.volume.values)
+    lin_mod = LinearRegression()
+    lin_mod.fit(x, y)
+    c_l = np.exp(lin_mod.intercept_)
+    q = lin_mod.coef_[0]
+    r_sq_l = lin_mod.score(x, y)
+    # volume/area linear regression in log-log space
+    x = np.log(df.area.values).reshape(-1, 1)
+    y = np.log(df.volume.values)
+    lin_mod = LinearRegression()
+    lin_mod.fit(x, y)
+    c_a = np.exp(lin_mod.intercept_)
+    gamma = lin_mod.coef_[0]
+    r_sq_a = lin_mod.score(x, y)
+
+    return {'c_l': c_l, 'c_a': c_a, 'q': q, 'gamma': gamma,
+            'r_sq_l': r_sq_l, 'r_sq_a': r_sq_a}
 
 
 def get_yearly_mb_temp_prcp(gdir, time_range=None, year_range=None):
