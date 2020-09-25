@@ -1333,7 +1333,7 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
                        bias=None, seed=None, temperature_bias=None,
                        climate_filename='climate_historical',
                        climate_input_filesuffix='', output_filesuffix='',
-                       init_area_m2=None, unique_samples=False):
+                       init_area_m2=None, unique_samples=False, **kwargs):
     """Runs the random mass balance model for a given number of years.
 
     This initializes a :py:class:`oggm.core.vascaling.RandomVASMassBalance`,
@@ -1409,7 +1409,7 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
                                   filesuffix=output_filesuffix,
                                   delete=True)
     # run model
-    model.run_until_and_store(year_end=nyears, diag_path=diag_path)
+    model.run_until_and_store(year_end=nyears, diag_path=diag_path, **kwargs)
 
     return model
 
@@ -1635,7 +1635,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
                          bias=None, temperature_bias=None,
                          climate_filename='climate_historical',
                          climate_input_filesuffix='', output_filesuffix='',
-                         init_area_m2=None):
+                         init_area_m2=None, **kwargs):
     """
     Runs the constant mass balance model for a given number of years.
 
@@ -1699,7 +1699,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
                                   filesuffix=output_filesuffix,
                                   delete=True)
     # run model
-    model.run_until_and_store(year_end=nyears, diag_path=diag_path)
+    model.run_until_and_store(year_end=nyears, diag_path=diag_path, **kwargs)
 
     return model
 
@@ -1864,7 +1864,7 @@ class VAScalingModel(object):
         # increment year
         self.year += 1
 
-    def run_until(self, year_end, reset=False):
+    def run_until(self, year_end, reset=False, time_scale_factor=1):
         """Runs the model till the specified year.
         Returns all geometric parameters (i.e. length, area, volume, terminus
         elevation and specific mass balance) at the end of the model evolution.
@@ -1900,7 +1900,7 @@ class VAScalingModel(object):
             # iterate over all years
             while self.year < year_end:
                 # run model for one year
-                self.step()
+                self.step(time_scale_factor=time_scale_factor)
 
         # return metrics
         return (self.year, self.length_m, self.area_m2,
