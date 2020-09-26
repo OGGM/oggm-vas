@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 def get_ref_tstars_filepath(fname):
     fp = os.path.join(os.path.abspath(os.path.dirname(__file__)),
                       'data', fname)
+    print(fp)
     if not os.path.isfile(fp):
         raise InvalidParamsError('File {} does not exist in this '
                                  'repository'.format(fname))
@@ -350,6 +351,7 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 v = gdir.rgi_version[0]
                 # baseline climate
                 str_s = 'cru4' if 'CRU' in source else 'histalp'
+                # TODO -> change things here and use get_ref_tstars_filepath()
                 vn = 'vas_ref_tstars_rgi{}_{}_calib_params'.format(v, str_s)
                 for k in params:
                     if cfg.PARAMS[k] != cfg.PARAMS[vn][k]:
@@ -458,7 +460,7 @@ def t_star_from_refmb(gdir, mbdf=None):
 
     ny = len(years)
     mu_hp = int(cfg.PARAMS['mu_star_halfperiod'])
-    mb_per_mu = pd.Series(index=years)
+    mb_per_mu = pd.Series(index=years, dtype=np.float)
 
     # get mass balance relevant climate parameters
     years, temp, prcp = get_yearly_mb_temp_prcp(gdir, year_range=[y0, y1])
