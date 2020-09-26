@@ -1804,7 +1804,7 @@ class VAScalingModel(object):
         self.tau_l = max(self.tau_l, 1)
         self.tau_a = self.tau_l * self.area_m2 / self.length_m ** 2
         # relaxation time scale cannot be less than one year
-        self.tau_l = max(self.tau_a, 1)
+        self.tau_a = max(self.tau_a, 1)
 
     def reset(self):
         """Set model attributes back to starting values."""
@@ -1885,7 +1885,6 @@ class VAScalingModel(object):
             [m asl.], specific mass balance [mm w.e.]
 
         """
-
         # reset parameters to starting values
         if reset:
             self.reset()
