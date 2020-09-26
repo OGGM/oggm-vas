@@ -1834,7 +1834,7 @@ class VAScalingModel(object):
             - computing new terminus elevation
         """
         # compute time scales
-        self._compute_time_scales()
+        self._compute_time_scales(factor=time_scale_factor)
 
         # get specific mass balance B(t)
         self._get_specific_mb()
