@@ -37,6 +37,15 @@ from oggm.core.massbalance import MassBalanceModel
 log = logging.getLogger(__name__)
 
 
+def get_ref_tstars_filepath(fname):
+    fp = os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                      'data', fname)
+    if not os.path.isfile(fp):
+        raise InvalidParamsError('File {} does not exist in this '
+                                 'repository'.format(fname))
+    return fp
+
+
 def compute_temp_terminus(temp, temp_grad, ref_hgt,
                           terminus_hgt, temp_anomaly=0):
     """Computes the (monthly) mean temperature at the glacier terminus,

@@ -25,7 +25,12 @@ import oggm_vas as vascaling
 # import gis libs
 gpd = pytest.importorskip('geopandas')
 
-pytestmark = pytest.mark.test_env("vascaling")
+
+def test_get_ref_tstars_filepath():
+    fp = vascaling.get_ref_tstars_filepath('vas_ref_tstars_rgi6_histalp.csv')
+    assert os.path.exists(fp)
+    with pytest.raises(ValueError):
+        vascaling.get_ref_tstars_filepath('dummy.csv')
 
 
 class TestVAScalingModel(unittest.TestCase):
