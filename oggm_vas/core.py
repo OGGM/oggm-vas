@@ -449,7 +449,7 @@ def t_star_from_refmb(gdir, mbdf=None):
 
     ny = len(years)
     mu_hp = int(cfg.PARAMS['mu_star_halfperiod'])
-    mb_per_mu = pd.Series(index=years)
+    mb_per_mu = pd.Series(index=years, dtype=float)
 
     # get mass balance relevant climate parameters
     years, temp, prcp = get_yearly_mb_temp_prcp(gdir, year_range=[y0, y1])
@@ -930,6 +930,13 @@ class VAScalingMassBalance(MassBalanceModel):
             equivalent per year [mm w.e./yr]
 
         """
+        # enables the routine to work on a list of years
+        # by calling itself for each given year in the list
+        if len(np.atleast_1d(year)) > 1:
+            out = [self.get_specific_mb(min_hgt=min_hgt, max_hgt=max_hgt, year=yr)
+                   for yr in year]
+            return np.asarray(out)
+
         # get annual mass balance climate
         temp_for_melt, prcp_solid = self.get_annual_climate(min_hgt,
                                                             max_hgt,
