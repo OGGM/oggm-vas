@@ -37,7 +37,47 @@ from oggm.core.massbalance import MassBalanceModel
 log = logging.getLogger(__name__)
 
 
+def initialize():
+    """ Calls OGGM's cfg.initialize() and adds VAS specific parameters.
+    Should always be called before anything else.
+    """
+
+    # call the oggm initialization
+    cfg.initialize()
+
+    # area-volume scaling parameters for glaciers (cp. Marzeion et. al., 2012)
+    # units: m^(3-2*gamma) and unitless, respectively
+    cfg.PARAMS['vas_c_area_m2'] = 0.191
+    cfg.PARAMS['vas_gamma_area'] = 1.375
+
+    # area-length scaling parameters for glaciers (cp. Marzeion et. al., 2012)
+    # units: m^(3-q) and unitless, respectively
+    cfg.PARAMS['vas_c_length_m'] = 4.5507
+    cfg.PARAMS['vas_q_length'] = 2.2
+
+    # TODO: include scaling parameters for ice caps?!
+
+    # add needed basenames
+    _doc = "A dict containing the glacier's t*, bias, mu*. Analogous " \
+           "to 'local_mustar.json', but for the volume/area scaling model."
+    cfg.add_to_basenames('vascaling_mustar', 'vascaling_mustar.json',
+                         docstr=_doc)
+
+
 def get_ref_tstars_filepath(fname):
+    """ Print and return absolute path to given file.
+
+    Parameters
+    ----------
+    fname : str
+        filename
+
+    Returns
+    -------
+    str
+        absolute path to given file
+
+    """
     fp = os.path.join(os.path.abspath(os.path.dirname(__file__)),
                       'data', fname)
     print(fp)
