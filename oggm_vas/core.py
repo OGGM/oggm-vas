@@ -391,16 +391,21 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 v = gdir.rgi_version[0]
                 # baseline climate
                 str_s = 'cru4' if 'CRU' in source else 'histalp'
-                # TODO -> change things here and use get_ref_tstars_filepath()
-                vn = 'vas_ref_tstars_rgi{}_{}_calib_params'.format(v, str_s)
+                # read calibration params reference table
+                fn = 'vas_ref_tstars_rgi{}_{}_calib_params'.format(v, str_s)
+                fp = get_ref_tstars_filepath(fn)
+                calib_params = gdir.read_json(fp)
+                # check if calibration params match
                 for k in params:
-                    if cfg.PARAMS[k] != cfg.PARAMS[vn][k]:
+                    if cfg.PARAMS[k] != calib_params[k]:
                         msg = ('The reference t* you are trying to use was '
                                'calibrated with different MB parameters. You '
                                'might have to run the calibration manually.')
                         raise MassBalanceCalibrationError(msg)
-
-                ref_df = cfg.PARAMS['vas_ref_tstars_rgi{}_{}'.format(v, str_s)]
+                # read reference table
+                fn = 'vas_ref_tstars_rgi{}_{}'.format(v, str_s)
+                fp = get_ref_tstars_filepath(fn)
+                ref_df = pd.read_csv(fp)
             else:
                 # Use the the local calibration
                 fp = os.path.join(cfg.PATHS['working_dir'], 'ref_tstars.csv')
