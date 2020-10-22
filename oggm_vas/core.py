@@ -57,12 +57,6 @@ def initialize():
 
     # TODO: include scaling parameters for ice caps?!
 
-    # add needed basenames
-    _doc = "A dict containing the glacier's t*, bias, mu*. Analogous " \
-           "to 'local_mustar.json', but for the volume/area scaling model."
-    cfg.add_to_basenames('vascaling_mustar', 'vascaling_mustar.json',
-                         docstr=_doc)
-
 
 def get_ref_tstars_filepath(fname):
     """ Print and return absolute path to given file.

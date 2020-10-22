@@ -1,4 +1,9 @@
 # flake8: noqa
+from oggm import cfg
+_doc = ("A dict containing the glacier's t*, bias, mu*. Analogous "
+        "to 'local_mustar.json', but for the volume/area scaling model.")
+cfg.add_to_basenames('vascaling_mustar', 'vascaling_mustar.json', docstr=_doc)
+
 try:
     from .version import version as __version__
     from .version import isreleased as __isreleased__
