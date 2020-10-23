@@ -8,6 +8,7 @@ Author: Moritz Oberrauch
 """
 # Built ins
 import os
+import json
 import logging
 import datetime
 from time import gmtime, strftime
@@ -35,6 +36,49 @@ from oggm.core.massbalance import MassBalanceModel
 
 # Module logger
 log = logging.getLogger(__name__)
+
+
+def initialize():
+    """ Calls OGGM's cfg.initialize() and adds VAS specific parameters.
+    Should always be called before anything else.
+    """
+
+    # call the oggm initialization
+    cfg.initialize()
+
+    # area-volume scaling parameters for glaciers (cp. Marzeion et. al., 2012)
+    # units: m^(3-2*gamma) and unitless, respectively
+    cfg.PARAMS['vas_c_area_m2'] = 0.191
+    cfg.PARAMS['vas_gamma_area'] = 1.375
+
+    # area-length scaling parameters for glaciers (cp. Marzeion et. al., 2012)
+    # units: m^(3-q) and unitless, respectively
+    cfg.PARAMS['vas_c_length_m'] = 4.5507
+    cfg.PARAMS['vas_q_length'] = 2.2
+
+    # TODO: include scaling parameters for ice caps?!
+
+
+def get_ref_tstars_filepath(fname):
+    """ Returns absolute path to given file within repository.
+
+    Parameters
+    ----------
+    fname : str
+        filename
+
+    Returns
+    -------
+    str
+        absolute path to given file
+
+    """
+    fp = os.path.join(os.path.abspath(os.path.dirname(__file__)),
+                      'data', fname)
+    if not os.path.isfile(fp):
+        raise InvalidParamsError('File {} does not exist in this '
+                                 'repository'.format(fname))
+    return fp
 
 
 def compute_temp_terminus(temp, temp_grad, ref_hgt,
@@ -341,15 +385,21 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 v = gdir.rgi_version[0]
                 # baseline climate
                 str_s = 'cru4' if 'CRU' in source else 'histalp'
-                vn = 'vas_ref_tstars_rgi{}_{}_calib_params'.format(v, str_s)
+                # read calibration params reference table
+                fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v, str_s)
+                fp = get_ref_tstars_filepath(fn)
+                calib_params = json.load(open(fp))
+                # check if calibration params match
                 for k in params:
-                    if cfg.PARAMS[k] != cfg.PARAMS[vn][k]:
+                    if cfg.PARAMS[k] != calib_params[k]:
                         msg = ('The reference t* you are trying to use was '
                                'calibrated with different MB parameters. You '
                                'might have to run the calibration manually.')
                         raise MassBalanceCalibrationError(msg)
-
-                ref_df = cfg.PARAMS['vas_ref_tstars_rgi{}_{}'.format(v, str_s)]
+                # read reference table
+                fn = 'vas_ref_tstars_rgi{}_{}.csv'.format(v, str_s)
+                fp = get_ref_tstars_filepath(fn)
+                ref_df = pd.read_csv(fp)
             else:
                 # Use the the local calibration
                 fp = os.path.join(cfg.PATHS['working_dir'], 'ref_tstars.csv')
