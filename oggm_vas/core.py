@@ -8,6 +8,7 @@ Author: Moritz Oberrauch
 """
 # Built ins
 import os
+import json
 import logging
 import datetime
 from time import gmtime, strftime
@@ -59,7 +60,7 @@ def initialize():
 
 
 def get_ref_tstars_filepath(fname):
-    """ Print and return absolute path to given file.
+    """ Returns absolute path to given file within repository.
 
     Parameters
     ----------
@@ -74,7 +75,6 @@ def get_ref_tstars_filepath(fname):
     """
     fp = os.path.join(os.path.abspath(os.path.dirname(__file__)),
                       'data', fname)
-    print(fp)
     if not os.path.isfile(fp):
         raise InvalidParamsError('File {} does not exist in this '
                                  'repository'.format(fname))
@@ -386,9 +386,9 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 # baseline climate
                 str_s = 'cru4' if 'CRU' in source else 'histalp'
                 # read calibration params reference table
-                fn = 'vas_ref_tstars_rgi{}_{}_calib_params'.format(v, str_s)
+                fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v, str_s)
                 fp = get_ref_tstars_filepath(fn)
-                calib_params = gdir.read_json(fp)
+                calib_params = json.load(open(fp))
                 # check if calibration params match
                 for k in params:
                     if cfg.PARAMS[k] != calib_params[k]:
@@ -397,7 +397,7 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                                'might have to run the calibration manually.')
                         raise MassBalanceCalibrationError(msg)
                 # read reference table
-                fn = 'vas_ref_tstars_rgi{}_{}'.format(v, str_s)
+                fn = 'vas_ref_tstars_rgi{}_{}.csv'.format(v, str_s)
                 fp = get_ref_tstars_filepath(fn)
                 ref_df = pd.read_csv(fp)
             else:
