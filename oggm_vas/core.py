@@ -39,13 +39,19 @@ from oggm.core.massbalance import MassBalanceModel
 log = logging.getLogger(__name__)
 
 
-def initialize():
-    """ Calls OGGM's cfg.initialize() and adds VAS specific parameters.
+def initialize(**kwargs):
+    """Calls OGGM's cfg.initialize() and adds VAS specific parameters.
     Should always be called before anything else.
+
+    Parameters
+    ----------
+    kwargs
+        Keyword arguments are passed to OGGM's cfg.initialize()
+
     """
 
     # call the oggm initialization
-    cfg.initialize()
+    cfg.initialize(**kwargs)
 
     # area-volume scaling parameters for glaciers (cp. Marzeion et. al., 2012)
     # units: m^(3-2*gamma) and unitless, respectively
@@ -329,7 +335,7 @@ def get_yearly_mb_temp_prcp(gdir, time_range=None, year_range=None):
     if year_range is not None:
         sm = cfg.PARAMS['hydro_month_' + gdir.hemisphere]
         em = sm - 1 if (sm > 1) else 12
-        t0 = datetime.datetime(year_range[0]-1, sm, 1)
+        t0 = datetime.datetime(year_range[0] - 1, sm, 1)
         t1 = datetime.datetime(year_range[1], em, 1)
         return get_yearly_mb_temp_prcp(gdir, time_range=[t0, t1])
 
@@ -367,16 +373,16 @@ def get_yearly_mb_temp_prcp(gdir, time_range=None, year_range=None):
                                                           'found in file')
         else:
             p0 = 0
-            p1 = len(time)-1
+            p1 = len(time) - 1
 
-        time = time[p0:p1+1]
+        time = time[p0:p1 + 1]
 
         # read time series of temperature and precipitation
-        itemp = nc.variables['temp'][p0:p1+1]
-        iprcp = nc.variables['prcp'][p0:p1+1]
+        itemp = nc.variables['temp'][p0:p1 + 1]
+        iprcp = nc.variables['prcp'][p0:p1 + 1]
         # read time series of temperature lapse rate
         if 'gradient' in nc.variables:
-            igrad = nc.variables['gradient'][p0:p1+1]
+            igrad = nc.variables['gradient'][p0:p1 + 1]
             # Security for stuff that can happen with local gradients
             igrad = np.where(~np.isfinite(igrad), default_grad, igrad)
             igrad = np.clip(igrad, g_minmax[0], g_minmax[1])
@@ -438,7 +444,7 @@ def _fallback_local_t_star(gdir):
     df['rgi_id'] = gdir.rgi_id
     df['t_star'] = np.nan
     df['bias'] = np.nan
-    df['mu_star_glacierwide'] = np.nan
+    df['mu_star'] = np.nan
     gdir.write_json(df, 'vascaling_mustar')
 
 
@@ -489,7 +495,8 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 # baseline climate
                 str_s = 'cru4' if 'CRU' in source else 'histalp'
                 # read calibration params reference table
-                fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v, str_s)
+                fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v,
+                                                                        str_s)
                 fp = get_ref_tstars_filepath(fn)
                 calib_params = json.load(open(fp))
                 # check if calibration params match
@@ -515,15 +522,15 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
         # Take the 10 closest
         aso = np.argsort(distances)[0:9]
         amin = ref_df.iloc[aso]
-        distances = distances[aso]**2
+        distances = distances[aso] ** 2
 
         # If really close no need to divide, else weighted average
         if distances.iloc[0] <= 0.1:
             tstar = amin.tstar.iloc[0]
             bias = amin.bias.iloc[0]
         else:
-            tstar = int(np.average(amin.tstar, weights=1./distances))
-            bias = np.average(amin.bias, weights=1./distances)
+            tstar = int(np.average(amin.tstar, weights=1. / distances))
+            bias = np.average(amin.bias, weights=1. / distances)
 
     # Add the climate related params to the GlacierDir to make sure
     # other tools cannot fool around without re-calibration
@@ -598,7 +605,7 @@ def t_star_from_refmb(gdir, mbdf=None):
     ci = gdir.get_climate_info()
     y0 = y0 or ci['baseline_hydro_yr_0']
     y1 = y1 or ci['baseline_hydro_yr_1']
-    years = np.arange(y0, y1+1)
+    years = np.arange(y0, y1 + 1)
 
     ny = len(years)
     mu_hp = int(cfg.PARAMS['mu_star_halfperiod'])
@@ -704,7 +711,7 @@ def compute_ref_t_stars(gdirs):
 
 
 @entity_task(log)
-def find_start_area(gdir, year_start=1851):
+def find_start_area(gdir, year_start=1851, adjust_term_elev=False):
     """This task find the start area for the given glacier, which results in
     the best results after the model integration (i.e., modeled glacier surface
     closest to measured RGI surface in 2003).
@@ -718,6 +725,9 @@ def find_start_area(gdir, year_start=1851):
     year_start : int, optional
         year at the beginning of the model integration, default = 1851
         (best choice for working with HISTALP data)
+    adjust_term_elev: bool, optional, default=False
+        flag deciding wheter or not to update the terminus elevation with the
+        new initial glacier surface area (not done by Marzeion et al. (2012))
 
     Returns
     -------
@@ -740,7 +750,8 @@ def find_start_area(gdir, year_start=1851):
                                min_hgt=h_min, max_hgt=h_max,
                                mb_model=mbmod)
 
-    def _to_minimize(area_m2_start, ref, _year_start=year_start):
+    def _to_minimize(area_m2_start, ref, _year_start=year_start,
+                     _adjust_term_elev=adjust_term_elev):
         """Initialize VAS glacier model as copy of the reference model (ref)
         and adjust the model to the given starting area (area_m2_start) and
         starting year (1851). Let the model evolve to the same year as the
@@ -752,6 +763,9 @@ def find_start_area(gdir, year_start=1851):
         ref : :py:class:`oggm.VAScalingModel`
         _year_start : float, optional
              the default value is inherited from the surrounding task
+        adjust_term_elev: bool, optional
+            flag deciding wheter or not to update the terminus elevation with
+            the new initial glacier surface area
 
         Returns
         -------
@@ -766,7 +780,8 @@ def find_start_area(gdir, year_start=1851):
                                    max_hgt=ref.max_hgt,
                                    mb_model=ref.mb_model)
         # scale to desired starting size
-        model_tmp.create_start_glacier(area_m2_start, year_start=_year_start)
+        model_tmp.create_start_glacier(area_m2_start, year_start=_year_start,
+                                       adjust_term_elev=_adjust_term_elev)
         # run and compare, return relative error
         return np.abs(model_tmp.run_and_compare(ref))
 
@@ -876,8 +891,8 @@ class VAScalingMassBalance(MassBalanceModel):
                 raise ValueError('Climate data should be N full years')
             # This is where we switch to hydro float year format
             # Last year gives the tone of the hydro year
-            self.years = np.repeat(np.arange(time[-1].year-ny+1,
-                                             time[-1].year+1), 12)
+            self.years = np.repeat(np.arange(time[-1].year - ny + 1,
+                                             time[-1].year + 1), 12)
             self.months = np.tile(np.arange(1, 13), ny)
             # Read timeseries
             self.temp = nc.variables['temp'][:]
@@ -1086,8 +1101,9 @@ class VAScalingMassBalance(MassBalanceModel):
         # enables the routine to work on a list of years
         # by calling itself for each given year in the list
         if len(np.atleast_1d(year)) > 1:
-            out = [self.get_specific_mb(min_hgt=min_hgt, max_hgt=max_hgt, year=yr)
-                   for yr in year]
+            out = [
+                self.get_specific_mb(min_hgt=min_hgt, max_hgt=max_hgt, year=yr)
+                for yr in year]
             return np.asarray(out)
 
         # get annual mass balance climate
@@ -1224,9 +1240,9 @@ class RandomVASMassBalance(MassBalanceModel):
                 # set y0 as attribute
                 self.y0 = y0
             # use 31-year period around given year `y0`
-            self.years = np.arange(self.y0-halfsize, self.y0+halfsize+1)
+            self.years = np.arange(self.y0 - halfsize, self.y0 + halfsize + 1)
         # define year range and number of years
-        self.yr_range = (self.years[0], self.years[-1]+1)
+        self.yr_range = (self.years[0], self.years[-1] + 1)
         self.ny = len(self.years)
         self.hemisphere = gdir.hemisphere
 
@@ -1782,11 +1798,11 @@ class VAScalingModel(object):
         """String representation of the dynamic model, includes current
         year, area, volume, length and terminus elevation."""
         return "{}\nyear: {}\n".format(self.__class__, self.year) \
-            + "area [km2]: {:.2f}\n".format(self.area_m2 / 1e6) \
-            + "volume [km3]: {:.3f}\n".format(self.volume_m3 / 1e9) \
-            + "length [km]: {:.2f}\n".format(self.length_m / 1e3) \
-            + "min elev [m asl.]: {:.0f}\n".format(self.min_hgt) \
-            + "spec mb [mm w.e. yr-1]: {:.2f}".format(self.spec_mb)
+               + "area [km2]: {:.2f}\n".format(self.area_m2 / 1e6) \
+               + "volume [km3]: {:.3f}\n".format(self.volume_m3 / 1e9) \
+               + "length [km]: {:.2f}\n".format(self.length_m / 1e3) \
+               + "min elev [m asl.]: {:.0f}\n".format(self.min_hgt) \
+               + "spec mb [mm w.e. yr-1]: {:.2f}".format(self.spec_mb)
 
     def __init__(self, year_0, area_m2_0, min_hgt, max_hgt, mb_model):
         """Instance new glacier model.
@@ -1857,7 +1873,7 @@ class VAScalingModel(object):
         """Compute the time scales for glacier length `tau_l`
         and glacier surface area `tau_a` for current time step."""
         self.tau_l = max(1, (self.volume_m3 / (self.mb_model.prcp_clim
-                                              * self.area_m2)) * factor)
+                                               * self.area_m2)) * factor)
         self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
 
     def reset(self):
@@ -2200,7 +2216,7 @@ class VAScalingModel(object):
                                                 reset=True)
         assert year == model_ref.year
         # compute relative difference to reference area
-        rel_error = 1 - area/model_ref.area_m2
+        rel_error = 1 - area / model_ref.area_m2
 
         return rel_error
 
