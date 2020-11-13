@@ -1872,9 +1872,14 @@ class VAScalingModel(object):
     def _compute_time_scales(self, factor=1):
         """Compute the time scales for glacier length `tau_l`
         and glacier surface area `tau_a` for current time step."""
+        # setting the time scales to 1 year is necessary for certain usecases
+        # self.tau_l = 1
+        # self.tau_a = 1
         self.tau_l = max(1, (self.volume_m3 / (self.mb_model.prcp_clim
                                                * self.area_m2)) * factor)
         self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
+
+
 
     def reset(self):
         """Set model attributes back to starting values."""
