@@ -237,6 +237,10 @@ class TestVAScalingModel(unittest.TestCase):
         np.testing.assert_allclose(min_hgt, min_target, rtol=1e-2)
         np.testing.assert_allclose(max_hgt, max_target, rtol=1e-2)
 
+    def test_scaling_constants(self):
+        pass
+
+
     def test_yearly_mb_temp_prcp(self):
         """Test the routine which returns the yearly mass balance relevant
         climate parameters, i.e. positive melting temperature and solid

@@ -19,6 +19,7 @@ import pandas as pd
 import xarray as xr
 import netCDF4
 from scipy.optimize import minimize_scalar
+from sklearn.linear_model import LinearRegression
 
 # import OGGM modules
 import oggm
@@ -27,7 +28,7 @@ from oggm.cfg import SEC_IN_YEAR, SEC_IN_MONTH
 
 from oggm import __version__
 
-from oggm import utils, entity_task, global_task
+from oggm import utils, entity_task, global_task, workflow
 from oggm.utils import floatyear_to_date, ncDataset
 from oggm.exceptions import InvalidParamsError, MassBalanceCalibrationError
 
@@ -38,13 +39,19 @@ from oggm.core.massbalance import MassBalanceModel
 log = logging.getLogger(__name__)
 
 
-def initialize():
-    """ Calls OGGM's cfg.initialize() and adds VAS specific parameters.
+def initialize(**kwargs):
+    """Calls OGGM's cfg.initialize() and adds VAS specific parameters.
     Should always be called before anything else.
+
+    Parameters
+    ----------
+    kwargs
+        Keyword arguments are passed to OGGM's cfg.initialize()
+
     """
 
     # call the oggm initialization
-    cfg.initialize()
+    cfg.initialize(**kwargs)
 
     # area-volume scaling parameters for glaciers (cp. Marzeion et. al., 2012)
     # units: m^(3-2*gamma) and unitless, respectively
@@ -197,6 +204,108 @@ def get_min_max_elevation(gdir):
     return min_elev, max_elev
 
 
+def get_scaling_constant(gdirs):
+    """ The scaling constants (c_l and c_a for volume/length and volume/area
+    scaling respectively) are random variables and vary from glacier to
+    glacier. This function computes these constants for the given glaciers,
+    based on the RGI area, the inversion volume and the flowline length.
+    Returns dictionary with parameters
+
+    NOTE: The scaling constants are theoretically not independent of each other.
+    Here, the scaling constants are separately estimated via a linear
+    regression. So don't expect to get the same volume if you apply V/A scaling
+    and V/L scaling to the same glacier.
+
+    Parameters
+    ----------
+    gdirs : list of :py:class:`oggm.GlacierDirectory` objects
+
+    Returns
+    -------
+    {float, float}
+        volume/length and volume/area scaling constants
+
+    """
+    # get glacier geometries
+    glacier_stats = workflow.execute_entity_task(utils.glacier_statistics,
+                                                 gdirs)
+    rgi_id = [gs.get('rgi_id', np.NaN) for gs in glacier_stats]
+    length = [gs.get('longuest_centerline_km', np.NaN) * 1e3
+              for gs in glacier_stats]
+    area = [gs.get('rgi_area_km2', np.NaN) * 1e6 for gs in glacier_stats]
+    volume = [gs.get('inv_volume_km3', np.NaN) * 1e9 for gs in glacier_stats]
+    # create DataFrame
+    df = pd.DataFrame({'length': length, 'area': area, 'volume': volume},
+                      index=pd.Index(rgi_id, name='rgi_id'))
+    # drop glaciers where one of the geometries is missing
+    df = df.dropna()
+    # linear regression in log-log space for given slope
+    c_l = np.exp(np.mean(np.log(df.volume.values)
+                         - (cfg.PARAMS['vas_q_length']
+                            * np.log(df.length.values))))
+    c_a = np.exp(np.mean(np.log(df.volume.values)
+                         - (cfg.PARAMS['vas_gamma_area']
+                            * np.log(df.area.values))))
+
+    return {'c_l': c_l, 'c_a': c_a}
+
+
+def get_scaling_constant_exponent(gdirs):
+    """ Compute scaling constants and exponent from a linear regression in
+    log-log space. Returns scaling constant, scaling exponent and r squared
+    for the volume/length scaling and volume/area scaling in dictionary.
+
+    NOTE: The scaling parameters are theoretically not independent of each
+    other. Here, they are separately estimated via a linear regression. So
+    don't expect to get the same volume if you apply V/A scaling and V/L
+    scaling to the same glacier.
+
+    Parameters
+    ----------
+    gdirs : list of :py:class:`oggm.GlacierDirectory` objects
+
+    Returns
+    -------
+    [(float, float, float), (float, float, float)]
+        scaling constant, scaling exponent and r squared for the volume/length
+        scaling and volume/area scaling, respectively.
+
+
+    """
+    # get glacier geometries
+    glacier_stats = workflow.execute_entity_task(utils.glacier_statistics,
+                                                 gdirs)
+    rgi_id = [gs.get('rgi_id', np.NaN) for gs in glacier_stats]
+    length = [gs.get('longuest_centerline_km', np.NaN) * 1e3
+              for gs in glacier_stats]
+    area = [gs.get('rgi_area_km2', np.NaN) * 1e6 for gs in glacier_stats]
+    volume = [gs.get('inv_volume_km3', np.NaN) * 1e9 for gs in glacier_stats]
+    # create DataFrame
+    df = pd.DataFrame({'length': length, 'area': area, 'volume': volume},
+                      index=pd.Index(rgi_id, name='rgi_id'))
+    # drop glaciers where one of the geometries is missing
+    df = df.dropna()
+    # volume/length linear regression in log-log space
+    x = np.log(df.length.values).reshape(-1, 1)
+    y = np.log(df.volume.values)
+    lin_mod = LinearRegression()
+    lin_mod.fit(x, y)
+    c_l = np.exp(lin_mod.intercept_)
+    q = lin_mod.coef_[0]
+    r_sq_l = lin_mod.score(x, y)
+    # volume/area linear regression in log-log space
+    x = np.log(df.area.values).reshape(-1, 1)
+    y = np.log(df.volume.values)
+    lin_mod = LinearRegression()
+    lin_mod.fit(x, y)
+    c_a = np.exp(lin_mod.intercept_)
+    gamma = lin_mod.coef_[0]
+    r_sq_a = lin_mod.score(x, y)
+
+    return {'c_l': c_l, 'c_a': c_a, 'q': q, 'gamma': gamma,
+            'r_sq_l': r_sq_l, 'r_sq_a': r_sq_a}
+
+
 def get_yearly_mb_temp_prcp(gdir, time_range=None, year_range=None):
     """Read climate file and compute mass balance relevant climate parameters.
     Those are the positive melting temperature at glacier terminus elevation
@@ -226,7 +335,7 @@ def get_yearly_mb_temp_prcp(gdir, time_range=None, year_range=None):
     if year_range is not None:
         sm = cfg.PARAMS['hydro_month_' + gdir.hemisphere]
         em = sm - 1 if (sm > 1) else 12
-        t0 = datetime.datetime(year_range[0]-1, sm, 1)
+        t0 = datetime.datetime(year_range[0] - 1, sm, 1)
         t1 = datetime.datetime(year_range[1], em, 1)
         return get_yearly_mb_temp_prcp(gdir, time_range=[t0, t1])
 
@@ -264,16 +373,16 @@ def get_yearly_mb_temp_prcp(gdir, time_range=None, year_range=None):
                                                           'found in file')
         else:
             p0 = 0
-            p1 = len(time)-1
+            p1 = len(time) - 1
 
-        time = time[p0:p1+1]
+        time = time[p0:p1 + 1]
 
         # read time series of temperature and precipitation
-        itemp = nc.variables['temp'][p0:p1+1]
-        iprcp = nc.variables['prcp'][p0:p1+1]
+        itemp = nc.variables['temp'][p0:p1 + 1]
+        iprcp = nc.variables['prcp'][p0:p1 + 1]
         # read time series of temperature lapse rate
         if 'gradient' in nc.variables:
-            igrad = nc.variables['gradient'][p0:p1+1]
+            igrad = nc.variables['gradient'][p0:p1 + 1]
             # Security for stuff that can happen with local gradients
             igrad = np.where(~np.isfinite(igrad), default_grad, igrad)
             igrad = np.clip(igrad, g_minmax[0], g_minmax[1])
@@ -335,7 +444,7 @@ def _fallback_local_t_star(gdir):
     df['rgi_id'] = gdir.rgi_id
     df['t_star'] = np.nan
     df['bias'] = np.nan
-    df['mu_star_glacierwide'] = np.nan
+    df['mu_star'] = np.nan
     gdir.write_json(df, 'vascaling_mustar')
 
 
@@ -386,7 +495,8 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 # baseline climate
                 str_s = 'cru4' if 'CRU' in source else 'histalp'
                 # read calibration params reference table
-                fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v, str_s)
+                fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v,
+                                                                        str_s)
                 fp = get_ref_tstars_filepath(fn)
                 calib_params = json.load(open(fp))
                 # check if calibration params match
@@ -412,15 +522,15 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
         # Take the 10 closest
         aso = np.argsort(distances)[0:9]
         amin = ref_df.iloc[aso]
-        distances = distances[aso]**2
+        distances = distances[aso] ** 2
 
         # If really close no need to divide, else weighted average
         if distances.iloc[0] <= 0.1:
             tstar = amin.tstar.iloc[0]
             bias = amin.bias.iloc[0]
         else:
-            tstar = int(np.average(amin.tstar, weights=1./distances))
-            bias = np.average(amin.bias, weights=1./distances)
+            tstar = int(np.average(amin.tstar, weights=1. / distances))
+            bias = np.average(amin.bias, weights=1. / distances)
 
     # Add the climate related params to the GlacierDir to make sure
     # other tools cannot fool around without re-calibration
@@ -495,7 +605,7 @@ def t_star_from_refmb(gdir, mbdf=None):
     ci = gdir.get_climate_info()
     y0 = y0 or ci['baseline_hydro_yr_0']
     y1 = y1 or ci['baseline_hydro_yr_1']
-    years = np.arange(y0, y1+1)
+    years = np.arange(y0, y1 + 1)
 
     ny = len(years)
     mu_hp = int(cfg.PARAMS['mu_star_halfperiod'])
@@ -601,7 +711,8 @@ def compute_ref_t_stars(gdirs):
 
 
 @entity_task(log)
-def find_start_area(gdir, year_start=1851):
+def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
+                    instant_geometry_change=False):
     """This task find the start area for the given glacier, which results in
     the best results after the model integration (i.e., modeled glacier surface
     closest to measured RGI surface in 2003).
@@ -615,6 +726,9 @@ def find_start_area(gdir, year_start=1851):
     year_start : int, optional
         year at the beginning of the model integration, default = 1851
         (best choice for working with HISTALP data)
+    adjust_term_elev: bool, optional, default=False
+        flag deciding wheter or not to update the terminus elevation with the
+        new initial glacier surface area (not done by Marzeion et al. (2012))
 
     Returns
     -------
@@ -637,7 +751,8 @@ def find_start_area(gdir, year_start=1851):
                                min_hgt=h_min, max_hgt=h_max,
                                mb_model=mbmod)
 
-    def _to_minimize(area_m2_start, ref, _year_start=year_start):
+    def _to_minimize(area_m2_start, ref, _year_start=year_start,
+                     _adjust_term_elev=adjust_term_elev):
         """Initialize VAS glacier model as copy of the reference model (ref)
         and adjust the model to the given starting area (area_m2_start) and
         starting year (1851). Let the model evolve to the same year as the
@@ -649,6 +764,9 @@ def find_start_area(gdir, year_start=1851):
         ref : :py:class:`oggm.VAScalingModel`
         _year_start : float, optional
              the default value is inherited from the surrounding task
+        adjust_term_elev: bool, optional
+            flag deciding wheter or not to update the terminus elevation with
+            the new initial glacier surface area
 
         Returns
         -------
@@ -663,9 +781,11 @@ def find_start_area(gdir, year_start=1851):
                                    max_hgt=ref.max_hgt,
                                    mb_model=ref.mb_model)
         # scale to desired starting size
-        model_tmp.create_start_glacier(area_m2_start, year_start=_year_start)
+        model_tmp.create_start_glacier(area_m2_start, year_start=_year_start,
+                                       adjust_term_elev=_adjust_term_elev)
         # run and compare, return relative error
-        return np.abs(model_tmp.run_and_compare(ref))
+        return np.abs(model_tmp.run_and_compare(ref,
+                                                instant_geometry_change=instant_geometry_change))
 
     # define bounds - between 100m2 and two times the reference size
     area_m2_bounds = [100, 2 * model_ref.area_m2_0]
@@ -773,8 +893,8 @@ class VAScalingMassBalance(MassBalanceModel):
                 raise ValueError('Climate data should be N full years')
             # This is where we switch to hydro float year format
             # Last year gives the tone of the hydro year
-            self.years = np.repeat(np.arange(time[-1].year-ny+1,
-                                             time[-1].year+1), 12)
+            self.years = np.repeat(np.arange(time[-1].year - ny + 1,
+                                             time[-1].year + 1), 12)
             self.months = np.tile(np.arange(1, 13), ny)
             # Read timeseries
             self.temp = nc.variables['temp'][:]
@@ -983,8 +1103,9 @@ class VAScalingMassBalance(MassBalanceModel):
         # enables the routine to work on a list of years
         # by calling itself for each given year in the list
         if len(np.atleast_1d(year)) > 1:
-            out = [self.get_specific_mb(min_hgt=min_hgt, max_hgt=max_hgt, year=yr)
-                   for yr in year]
+            out = [
+                self.get_specific_mb(min_hgt=min_hgt, max_hgt=max_hgt, year=yr)
+                for yr in year]
             return np.asarray(out)
 
         # get annual mass balance climate
@@ -1121,9 +1242,9 @@ class RandomVASMassBalance(MassBalanceModel):
                 # set y0 as attribute
                 self.y0 = y0
             # use 31-year period around given year `y0`
-            self.years = np.arange(self.y0-halfsize, self.y0+halfsize+1)
+            self.years = np.arange(self.y0 - halfsize, self.y0 + halfsize + 1)
         # define year range and number of years
-        self.yr_range = (self.years[0], self.years[-1]+1)
+        self.yr_range = (self.years[0], self.years[-1] + 1)
         self.ny = len(self.years)
         self.hemisphere = gdir.hemisphere
 
@@ -1287,7 +1408,7 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
                        bias=None, seed=None, temperature_bias=None,
                        climate_filename='climate_historical',
                        climate_input_filesuffix='', output_filesuffix='',
-                       init_area_m2=None, unique_samples=False):
+                       init_area_m2=None, unique_samples=False, **kwargs):
     """Runs the random mass balance model for a given number of years.
 
     This initializes a :py:class:`oggm.core.vascaling.RandomVASMassBalance`,
@@ -1363,7 +1484,7 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
                                   filesuffix=output_filesuffix,
                                   delete=True)
     # run model
-    model.run_until_and_store(year_end=nyears, diag_path=diag_path)
+    model.run_until_and_store(year_end=nyears, diag_path=diag_path, **kwargs)
 
     return model
 
@@ -1589,7 +1710,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
                          bias=None, temperature_bias=None,
                          climate_filename='climate_historical',
                          climate_input_filesuffix='', output_filesuffix='',
-                         init_area_m2=None):
+                         init_area_m2=None, **kwargs):
     """
     Runs the constant mass balance model for a given number of years.
 
@@ -1653,7 +1774,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
                                   filesuffix=output_filesuffix,
                                   delete=True)
     # run model
-    model.run_until_and_store(year_end=nyears, diag_path=diag_path)
+    model.run_until_and_store(year_end=nyears, diag_path=diag_path, **kwargs)
 
     return model
 
@@ -1679,11 +1800,11 @@ class VAScalingModel(object):
         """String representation of the dynamic model, includes current
         year, area, volume, length and terminus elevation."""
         return "{}\nyear: {}\n".format(self.__class__, self.year) \
-            + "area [km2]: {:.2f}\n".format(self.area_m2 / 1e6) \
-            + "volume [km3]: {:.3f}\n".format(self.volume_m3 / 1e9) \
-            + "length [km]: {:.2f}\n".format(self.length_m / 1e3) \
-            + "min elev [m asl.]: {:.0f}\n".format(self.min_hgt) \
-            + "spec mb [mm w.e. yr-1]: {:.2f}".format(self.spec_mb)
+               + "area [km2]: {:.2f}\n".format(self.area_m2 / 1e6) \
+               + "volume [km3]: {:.3f}\n".format(self.volume_m3 / 1e9) \
+               + "length [km]: {:.2f}\n".format(self.length_m / 1e3) \
+               + "min elev [m asl.]: {:.0f}\n".format(self.min_hgt) \
+               + "spec mb [mm w.e. yr-1]: {:.2f}".format(self.spec_mb)
 
     def __init__(self, year_0, area_m2_0, min_hgt, max_hgt, mb_model):
         """Instance new glacier model.
@@ -1750,13 +1871,28 @@ class VAScalingModel(object):
                                                      self.max_hgt,
                                                      self.year)
 
-    def _compute_time_scales(self):
-        """Compute the time scales for glacier length `tau_l` and glacier
-        surface area `tau_a` for current time step. Both time scales are
-        floored at one year."""
-        self.tau_l = max(1, self.volume_m3 / (self.mb_model.prcp_clim
-                                              * self.area_m2))
-        self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
+    def _compute_time_scales(self, factor=1, instant_geometry_change=False):
+        """Compute the time scales for glacier length `tau_l`
+        and glacier surface area `tau_a` for current time step.
+        It is possible to scale the time scales by supplying a multiplicative
+        factor, or to simulate instant geometry changes by setting them to 1 yr
+
+        Parameters
+        ----------
+        factor: int, optional, default=1
+        instant_geometry_change: bool, optional, default=False
+
+        """
+        if instant_geometry_change:
+            # setting the time scales to 1 year may be usefull for certain usecases
+            # just uncomment the following two lines
+            self.tau_l = 1
+            self.tau_a = 1
+        else:
+            # compute time scales following Marzeion et al
+            self.tau_l = max(1, (self.volume_m3 / (self.mb_model.prcp_clim
+                                                   * self.area_m2)) * factor)
+            self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
 
     def reset(self):
         """Set model attributes back to starting values."""
@@ -1779,7 +1915,7 @@ class VAScalingModel(object):
         self.tau_l = 1
         pass
 
-    def step(self):
+    def step(self, time_scale_factor=1, instant_geometry_change=False):
         """Advance model glacier by one year. This includes the following:
             - computing time scales
             - computing the specific mass balance
@@ -1789,7 +1925,8 @@ class VAScalingModel(object):
             - computing new terminus elevation
         """
         # compute time scales
-        self._compute_time_scales()
+        self._compute_time_scales(factor=time_scale_factor,
+                                  instant_geometry_change=instant_geometry_change)
 
         # get specific mass balance B(t)
         self._get_specific_mb()
@@ -1816,7 +1953,8 @@ class VAScalingModel(object):
         # increment year
         self.year += 1
 
-    def run_until(self, year_end, reset=False):
+    def run_until(self, year_end, reset=False, time_scale_factor=1,
+                  instant_geometry_change=False):
         """Runs the model till the specified year.
         Returns all geometric parameters (i.e. length, area, volume, terminus
         elevation and specific mass balance) at the end of the model evolution.
@@ -1837,7 +1975,6 @@ class VAScalingModel(object):
             [m asl.], specific mass balance [mm w.e.]
 
         """
-
         # reset parameters to starting values
         if reset:
             self.reset()
@@ -1852,13 +1989,16 @@ class VAScalingModel(object):
             # iterate over all years
             while self.year < year_end:
                 # run model for one year
-                self.step()
+                self.step(time_scale_factor=time_scale_factor,
+                          instant_geometry_change=instant_geometry_change)
 
         # return metrics
         return (self.year, self.length_m, self.area_m2,
                 self.volume_m3, self.min_hgt, self.spec_mb)
 
-    def run_until_and_store(self, year_end, diag_path=None, reset=False):
+    def run_until_and_store(self, year_end, diag_path=None, reset=False,
+                            time_scale_factor=1,
+                            instant_geometry_change=False):
         """Runs the model till the specified year. Returns all relevant
         parameters (i.e. length, area, volume, terminus elevation and specific
         mass balance) for each time step as a xarray.Dataset. If a file path is
@@ -1977,7 +2117,8 @@ class VAScalingModel(object):
 
         # run the model
         for i, yr in enumerate(monthly_time):
-            self.run_until(yr)
+            self.run_until(yr, time_scale_factor=time_scale_factor,
+                           instant_geometry_change=instant_geometry_change)
             # store diagnostics
             diag_ds['volume_m3'].data[i] = self.volume_m3
             diag_ds['area_m2'].data[i] = self.area_m2
@@ -1993,8 +2134,10 @@ class VAScalingModel(object):
 
         return diag_ds
 
-    def run_until_equilibrium(self, rate=0.001, ystep=5, max_ite=200):
-        """ Try to run the glacier model until an equilibrium is reached.
+    def run_until_equilibrium(self, rate=0.001, ystep=5, max_ite=200,
+                              time_scale_factor=1,
+                              instant_geometry_change=False):
+        """ Try to run the glacier model until an equilibirum is reached.
         Works only with a constant mass balance model.
 
         Parameters
@@ -2026,7 +2169,9 @@ class VAScalingModel(object):
             #  store current volume ('before')
             v_bef = self.volume_m3
             # run for the given number of years
-            self.run_until(self.year + ystep)
+            self.run_until(self.year + ystep,
+                           time_scale_factor=time_scale_factor,
+                           instant_geometry_change=instant_geometry_change)
             # store new volume ('after')
             v_af = self.volume_m3
             #
@@ -2077,7 +2222,8 @@ class VAScalingModel(object):
         self.__init__(year_start, area_m2_start, min_hgt_start,
                       self.max_hgt, self.mb_model)
 
-    def run_and_compare(self, model_ref):
+    def run_and_compare(self, model_ref, time_scale_factor=1,
+                        instant_geometry_change=False):
         """Let the model glacier evolve to the same year as the reference
         model (`model_ref`). Compute and return the relative error in area.
 
@@ -2093,10 +2239,12 @@ class VAScalingModel(object):
         """
         # run model and store area
         year, _, area, _, _, _ = self.run_until(year_end=model_ref.year,
-                                                reset=True)
+                                                reset=True,
+                                                time_scale_factor=time_scale_factor,
+                                                instant_geometry_change=instant_geometry_change)
         assert year == model_ref.year
         # compute relative difference to reference area
-        rel_error = 1 - area/model_ref.area_m2
+        rel_error = 1 - area / model_ref.area_m2
 
         return rel_error
 
