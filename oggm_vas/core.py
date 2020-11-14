@@ -1869,17 +1869,28 @@ class VAScalingModel(object):
                                                      self.max_hgt,
                                                      self.year)
 
-    def _compute_time_scales(self, factor=1):
+    def _compute_time_scales(self, factor=1, instant_geometry_change=False):
         """Compute the time scales for glacier length `tau_l`
-        and glacier surface area `tau_a` for current time step."""
-        # setting the time scales to 1 year is necessary for certain usecases
-        # self.tau_l = 1
-        # self.tau_a = 1
-        self.tau_l = max(1, (self.volume_m3 / (self.mb_model.prcp_clim
-                                               * self.area_m2)) * factor)
-        self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
+        and glacier surface area `tau_a` for current time step.
+        It is possible to scale the time scales by supplying a multiplicative
+        factor, or to simulate instant geometry changes by setting them to 1 yr
 
+        Parameters
+        ----------
+        factor: int, optional, default=1
+        instant_geometry_change: bool, optional, default=False
 
+        """
+        if instant_geometry_change:
+            # setting the time scales to 1 year may be usefull for certain usecases
+            # just uncomment the following two lines
+            self.tau_l = 1
+            self.tau_a = 1
+        else:
+            # compute time scales following Marzeion et al
+            self.tau_l = max(1, (self.volume_m3 / (self.mb_model.prcp_clim
+                                                   * self.area_m2)) * factor)
+            self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
 
     def reset(self):
         """Set model attributes back to starting values."""
@@ -1902,7 +1913,7 @@ class VAScalingModel(object):
         self.tau_l = 1
         pass
 
-    def step(self, time_scale_factor=1):
+    def step(self, time_scale_factor=1, instant_geometry_change=False):
         """Advance model glacier by one year. This includes the following:
             - computing time scales
             - computing the specific mass balance
@@ -1912,7 +1923,8 @@ class VAScalingModel(object):
             - computing new terminus elevation
         """
         # compute time scales
-        self._compute_time_scales(factor=time_scale_factor)
+        self._compute_time_scales(factor=time_scale_factor,
+                                  instant_geometry_change=instant_geometry_change)
 
         # get specific mass balance B(t)
         self._get_specific_mb()
@@ -1939,7 +1951,8 @@ class VAScalingModel(object):
         # increment year
         self.year += 1
 
-    def run_until(self, year_end, reset=False, time_scale_factor=1):
+    def run_until(self, year_end, reset=False, time_scale_factor=1,
+                  instant_geometry_change=False):
         """Runs the model till the specified year.
         Returns all geometric parameters (i.e. length, area, volume, terminus
         elevation and specific mass balance) at the end of the model evolution.
@@ -1974,14 +1987,16 @@ class VAScalingModel(object):
             # iterate over all years
             while self.year < year_end:
                 # run model for one year
-                self.step(time_scale_factor=time_scale_factor)
+                self.step(time_scale_factor=time_scale_factor,
+                          instant_geometry_change=instant_geometry_change)
 
         # return metrics
         return (self.year, self.length_m, self.area_m2,
                 self.volume_m3, self.min_hgt, self.spec_mb)
 
     def run_until_and_store(self, year_end, diag_path=None, reset=False,
-                            time_scale_factor=1):
+                            time_scale_factor=1,
+                            instant_geometry_change=False):
         """Runs the model till the specified year. Returns all relevant
         parameters (i.e. length, area, volume, terminus elevation and specific
         mass balance) for each time step as a xarray.Dataset. If a file path is
@@ -2100,7 +2115,8 @@ class VAScalingModel(object):
 
         # run the model
         for i, yr in enumerate(monthly_time):
-            self.run_until(yr, time_scale_factor=time_scale_factor)
+            self.run_until(yr, time_scale_factor=time_scale_factor,
+                           instant_geometry_change=instant_geometry_change)
             # store diagnostics
             diag_ds['volume_m3'].data[i] = self.volume_m3
             diag_ds['area_m2'].data[i] = self.area_m2
@@ -2117,7 +2133,8 @@ class VAScalingModel(object):
         return diag_ds
 
     def run_until_equilibrium(self, rate=0.001, ystep=5, max_ite=200,
-                              time_scale_factor=1):
+                              time_scale_factor=1,
+                              instant_geometry_change=False):
         """ Try to run the glacier model until an equilibirum is reached.
         Works only with a constant mass balance model.
 
@@ -2151,7 +2168,8 @@ class VAScalingModel(object):
             v_bef = self.volume_m3
             # run for the given number of years
             self.run_until(self.year + ystep,
-                           time_scale_factor=time_scale_factor)
+                           time_scale_factor=time_scale_factor,
+                           instant_geometry_change=instant_geometry_change)
             # store new volume ('after')
             v_af = self.volume_m3
             #
@@ -2202,7 +2220,8 @@ class VAScalingModel(object):
         self.__init__(year_start, area_m2_start, min_hgt_start,
                       self.max_hgt, self.mb_model)
 
-    def run_and_compare(self, model_ref):
+    def run_and_compare(self, model_ref, time_scale_factor=1,
+                        instant_geometry_change=False):
         """Let the model glacier evolve to the same year as the reference
         model (`model_ref`). Compute and return the relative error in area.
 
@@ -2218,7 +2237,9 @@ class VAScalingModel(object):
         """
         # run model and store area
         year, _, area, _, _, _ = self.run_until(year_end=model_ref.year,
-                                                reset=True)
+                                                reset=True,
+                                                time_scale_factor=time_scale_factor,
+                                                instant_geometry_change=instant_geometry_change)
         assert year == model_ref.year
         # compute relative difference to reference area
         rel_error = 1 - area / model_ref.area_m2
