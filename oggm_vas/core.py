@@ -711,7 +711,8 @@ def compute_ref_t_stars(gdirs):
 
 
 @entity_task(log)
-def find_start_area(gdir, year_start=1851, adjust_term_elev=False):
+def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
+                    instant_geometry_change=False):
     """This task find the start area for the given glacier, which results in
     the best results after the model integration (i.e., modeled glacier surface
     closest to measured RGI surface in 2003).
@@ -783,7 +784,8 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False):
         model_tmp.create_start_glacier(area_m2_start, year_start=_year_start,
                                        adjust_term_elev=_adjust_term_elev)
         # run and compare, return relative error
-        return np.abs(model_tmp.run_and_compare(ref))
+        return np.abs(model_tmp.run_and_compare(ref,
+                                                instant_geometry_change=instant_geometry_change))
 
     # define bounds - between 100m2 and two times the reference size
     area_m2_bounds = [100, 2 * model_ref.area_m2_0]
