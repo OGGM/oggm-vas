@@ -484,7 +484,8 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 # Make some checks and use the default one
                 climate_info = gdir.get_climate_info()
                 source = climate_info['baseline_climate_source']
-                ok_source = ['CRU TS4.01', 'CRU TS3.23', 'HISTALP']
+                # ok_source = ['CRU TS4.01', 'CRU TS3.23', 'HISTALP']
+                ok_source = ['HISTALP']
                 if not np.any(s in source.upper() for s in ok_source):
                     msg = ('If you are using a custom climate file you should '
                            'run your own MB calibration.')
@@ -494,6 +495,7 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 v = gdir.rgi_version[0]
                 # baseline climate
                 str_s = 'cru4' if 'CRU' in source else 'histalp'
+                str_s = 'histalp'
                 # read calibration params reference table
                 fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v,
                                                                         str_s)
