@@ -474,7 +474,7 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
     """
 
     # specify relevant mass balance parameters
-    params = ['temp_default_gradient', 'temp_all_solid', 'temp_all_liq',
+    params = ['temp_default_gradient', 'temp_all_solid', #'temp_all_liq',
               'temp_melt', 'prcp_scaling_factor']
 
     if tstar is None or bias is None:
@@ -484,8 +484,8 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 # Make some checks and use the default one
                 climate_info = gdir.get_climate_info()
                 source = climate_info['baseline_climate_source']
-                # ok_source = ['CRU TS4.01', 'CRU TS3.23', 'HISTALP']
-                ok_source = ['HISTALP']
+                ok_source = ['CRU TS4.01', 'CRU TS3.23', 'HISTALP']
+                # ok_source = ['HISTALP']
                 if not np.any(s in source.upper() for s in ok_source):
                     msg = ('If you are using a custom climate file you should '
                            'run your own MB calibration.')
@@ -495,7 +495,7 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 v = gdir.rgi_version[0]
                 # baseline climate
                 str_s = 'cru4' if 'CRU' in source else 'histalp'
-                str_s = 'histalp'
+                # str_s = 'histalp'
                 # read calibration params reference table
                 fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v,
                                                                         str_s)
@@ -862,7 +862,7 @@ class VAScalingMassBalance(MassBalanceModel):
 
         # set mass balance calibration parameters
         self.t_solid = cfg.PARAMS['temp_all_solid']
-        self.t_liq = cfg.PARAMS['temp_all_liq']
+        # self.t_liq = cfg.PARAMS['temp_all_liq']
         self.t_melt = cfg.PARAMS['temp_melt']
         prcp_fac = cfg.PARAMS['prcp_scaling_factor']
         default_grad = cfg.PARAMS['temp_default_gradient']

@@ -1054,3 +1054,7 @@ class TestVAScalingModel(unittest.TestCase):
         # run glacier with random mass balance model
         with self.assertRaises(TypeError):
             model.run_until_equilibrium(rate=1e-4)
+
+    def test_match_regional_geodetic_mb(self):
+        pass
+
