@@ -474,7 +474,7 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
     """
 
     # specify relevant mass balance parameters
-    params = ['temp_default_gradient', 'temp_all_solid', #'temp_all_liq',
+    params = ['temp_default_gradient', 'temp_all_solid',  # 'temp_all_liq',
               'temp_melt', 'prcp_scaling_factor']
 
     if tstar is None or bias is None:
@@ -797,6 +797,175 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
                                        method='bounded')
 
     return minimization_res
+
+
+@entity_task(log)
+def fixed_geometry_mass_balance(gdir, ys=None, ye=None, years=None,
+                                monthly_step=False,
+                                climate_filename='climate_historical',
+                                climate_input_filesuffix=''):
+    """ Re-implementation from the OGGM, see original docstring below:
+
+    Computes the mass-balance with climate input from e.g. CRU or a GCM.
+
+    Parameters
+    ----------
+    gdir : :py:class:`oggm.GlacierDirectory`
+        the glacier directory to process
+    ys : int
+        start year of the model run (default: from the climate file)
+        date)
+    ye : int
+        end year of the model run (default: from the climate file)
+    years : array of ints
+        override ys and ye with the years of your choice
+    monthly_step : bool
+        whether to store the diagnostic data at a monthly time step or not
+        (default is yearly)
+    climate_filename : str
+        name of the climate file, e.g. 'climate_historical' (default) or
+        'gcm_data'
+    climate_input_filesuffix: str
+        filesuffix for the input climate file
+    """
+
+    if monthly_step:
+        raise NotImplementedError('monthly_step not implemented yet')
+
+    mb = VAScalingMassBalance(gdir, filename=climate_filename,
+                              input_filesuffix=climate_input_filesuffix)
+
+    if years is None:
+        if ys is None:
+            ys = mb.ys
+        if ye is None:
+            ye = mb.ye
+        years = np.arange(ys, ye + 1)
+
+    min_hgt, max_hgt = get_min_max_elevation(gdir)
+    odf = pd.Series(data=mb.get_specific_mb(year=years,
+                                            min_hgt=min_hgt,
+                                            max_hgt=max_hgt),
+                    index=years)
+    return odf
+
+
+def compile_fixed_geometry_mass_balance(gdirs, filesuffix='', path=True,
+                                        ys=None, ye=None, years=None):
+    """ Re-implementation from the OGGM, see original docstring below:
+
+    Compiles a table of specific mass-balance timeseries for all glaciers.
+
+    Parameters
+    ----------
+    gdirs : list of :py:class:`oggm.GlacierDirectory` objects
+        the glacier directories to process
+    filesuffix : str
+        add suffix to output file
+    path : str, bool
+        Set to "True" in order  to store the info in the working directory
+        Set to a path to store the file to your chosen location
+    ys : int
+        start year of the model run (default: from the climate file)
+        date)
+    ye : int
+        end year of the model run (default: from the climate file)
+    years : array of ints
+        override ys and ye with the years of your choice
+    """
+    # get fixed geometry mass balance for all given glaciers
+    out_df = workflow.execute_entity_task(fixed_geometry_mass_balance, gdirs,
+                                          ys=ys, ye=ye, years=years)
+
+    # combine into one DataFrame and handle missing data
+    for idx, s in enumerate(out_df):
+        if s is None:
+            out_df[idx] = pd.Series(np.NaN)
+    out = pd.concat(out_df, axis=1, keys=[gd.rgi_id for gd in gdirs])
+    out = out.dropna(axis=0, how='all')
+
+    # store to file
+    if path:
+        if path is True:
+            out.to_csv(os.path.join(cfg.PATHS['working_dir'],
+                                    ('vas_fixed_geometry_mass_balance' +
+                                     filesuffix + '.csv')))
+        else:
+            out.to_csv(path)
+    return out
+
+
+def match_regional_geodetic_mb(gdirs, rgi_reg):
+    """ Re-implementation from the OGGM, see original docstring below:
+
+    Regional shift of the mass-balance residual to match observations.
+    This is useful for operational runs, but also quite hacky.
+    Let's hope we won't need this for too long.
+
+    Parameters
+    ----------
+    gdirs : the list of gdirs (ideally the entire region_
+    rgi_reg : str
+       the rgi region to match
+    """
+
+    # Get the mass-balance VAS would give out of the box
+    df = compile_fixed_geometry_mass_balance(gdirs, path=False)
+    df = df.dropna(axis=0, how='all').dropna(axis=1, how='all')
+
+    # And also the Area and calving fluxes
+    dfs = utils.compile_glacier_statistics(gdirs, path=False)
+    odf = pd.DataFrame(df.loc[2006:2018].mean(), columns=['SMB'])
+    odf['AREA'] = dfs.rgi_area_km2 * 1e6
+    # TODO: calving not considered yet
+    # Just take the calving rate and change its units
+    # Original units: km3 a-1, to change to mm a-1 (units of specific MB)
+    # rho = cfg.PARAMS['ice_density']
+    # if 'calving_flux' in dfs:
+    #     odf['CALVING'] = dfs['calving_flux'].fillna(0) * 1e9 * rho / odf['AREA']
+    # else:
+    #     odf['CALVING'] = 0
+
+    # We have to drop nans here, which occur when calving glaciers fail to run
+    # odf = odf.dropna()
+
+    # Compare area with total RGI area
+    rdf = 'rgi62_areas.csv'
+    rdf = pd.read_csv(utils.get_demo_file(rdf), dtype={'O1Region': str})
+    ref_area = rdf.loc[rdf['O1Region'] == rgi_reg].iloc[0]['AreaNoC2NoNominal']
+    diff = (1 - odf['AREA'].sum() * 1e-6 / ref_area) * 100
+    msg = 'Applying geodetic MB correction on RGI reg {}. Diff area: {:.2f}%'
+    log.workflow(msg.format(rgi_reg, diff))
+
+    # Total MB OGGM
+    out_smb = np.average(odf['SMB'], weights=odf['AREA'])  # for logging
+    # TODO: calving not considered
+    # out_cal = np.average(odf['CALVING'], weights=odf['AREA'])  # for logging
+    # smb_oggm = np.average(odf['SMB'] - odf['CALVING'], weights=odf['AREA'])
+    smb_oggm = out_smb
+
+    # Total MB Reference
+    df = 'table_hugonnet_regions_10yr_20yr_ar6period.csv'
+    df = pd.read_csv(utils.get_demo_file(df))
+    df = df.loc[df.period == '2006-01-01_2019-01-01'].set_index('reg')
+    smb_ref = df.loc[int(rgi_reg), 'dmdtda']
+
+    # Diff between the two
+    residual = smb_ref - smb_oggm
+
+    # Let's just shift
+    log.workflow('Shifting regional MB bias by {}'.format(residual))
+    log.workflow('Observations give {}'.format(smb_ref))
+    log.workflow('OGGM SMB gives {}'.format(out_smb))
+    # log.workflow('OGGM frontal ablation gives {}'.format(out_cal))
+    for gdir in gdirs:
+        try:
+            df = gdir.read_json('local_mustar')
+            gdir.add_to_diagnostics('mb_bias_before_geodetic_corr', df['bias'])
+            df['bias'] = df['bias'] - residual
+            gdir.write_json(df, 'local_mustar')
+        except FileNotFoundError:
+            pass
 
 
 class VAScalingMassBalance(MassBalanceModel):
