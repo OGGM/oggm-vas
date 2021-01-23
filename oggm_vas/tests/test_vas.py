@@ -2,6 +2,7 @@
 
 # External libs
 import numpy as np
+import pandas as pd
 import datetime
 import os
 import shutil
@@ -41,6 +42,12 @@ class TestVAScalingModel(unittest.TestCase):
     def setUp(self):
         """Instance the TestCase, create the test directory,
         OGGM initialisation and setting paths and parameters.
+
+        Most input files, like the DEM, the climate file and the glacier
+        outline, come from the oggm-sample-data repository and my hence be
+        outdated. The test are performed on Hintereisferner (RGI60-11.00897),
+        running with HISTALP climate data and the matching mass balance
+        calibration parameters.
         """
 
         # test directory
@@ -50,7 +57,7 @@ class TestVAScalingModel(unittest.TestCase):
         self.clean_dir()
 
         # load default parameter file and set working directory
-        cfg.initialize()
+        vascaling.initialize()
         cfg.PATHS['working_dir'] = self.testdir
         # set path to GIS files
         cfg.PARAMS['use_intersects'] = False
@@ -60,11 +67,9 @@ class TestVAScalingModel(unittest.TestCase):
         cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
         cfg.PARAMS['run_mb_calibration'] = True
         # adjust parameters for HistAlp climate
-        cfg.PARAMS['prcp_scaling_factor'] = 1.75
-        cfg.PARAMS['temp_melt'] = -1.75
-        cfg.PARAMS['temp_all_liq'] = 2.
+        cfg.PARAMS['prcp_scaling_factor'] = 2.5
+        cfg.PARAMS['temp_melt'] = -0.5
         cfg.PARAMS['temp_all_solid'] = 0.
-        cfg.PARAMS['temp_default_gradient'] = -0.0065
 
         # coveralls.io has issues if multiprocessing is enabled
         cfg.PARAMS['use_multiprocessing'] = False
@@ -89,7 +94,7 @@ class TestVAScalingModel(unittest.TestCase):
         """
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -152,7 +157,7 @@ class TestVAScalingModel(unittest.TestCase):
         """
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -218,7 +223,7 @@ class TestVAScalingModel(unittest.TestCase):
         """
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -240,7 +245,6 @@ class TestVAScalingModel(unittest.TestCase):
     def test_scaling_constants(self):
         pass
 
-
     def test_yearly_mb_temp_prcp(self):
         """Test the routine which returns the yearly mass balance relevant
         climate parameters, i.e. positive melting temperature and solid
@@ -249,7 +253,7 @@ class TestVAScalingModel(unittest.TestCase):
         """
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -283,11 +287,10 @@ class TestVAScalingModel(unittest.TestCase):
         # consequentially, the average mass input must be less than (or equal
         # to) the mass input integrated over the whole glacier surface, i.e.
         # the mean deviation must be negative, using the OGGM data as reference
-        # TODO: does it actually?! And if so, why?! @ASK
         assert md(prcp_oggm, prcp) <= 0
 
         # correlation must be higher than set threshold
-        assert corrcoef(temp, temp_oggm) >= 0.94
+        assert corrcoef(temp, temp_oggm) >= 0.93
         assert corrcoef(prcp, prcp_oggm) >= 0.98
 
         # get terminus temperature using the OGGM routine
@@ -346,7 +349,7 @@ class TestVAScalingModel(unittest.TestCase):
         cfg.PARAMS['run_mb_calibration'] = False
 
         # read the Hintereisferner
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -374,7 +377,10 @@ class TestVAScalingModel(unittest.TestCase):
         vas_mustar_refmb = gdir.read_json('vascaling_mustar')
 
         # get reference t* list
-        ref_df = cfg.PARAMS['vas_ref_tstars_rgi5_histalp']
+        fn = 'vas_ref_tstars_rgi6_histalp.csv'
+        fp = vascaling.get_ref_tstars_filepath(fn)
+        ref_df = pd.read_csv(fp)
+
         # compute local t* and the corresponding mu*
         vascaling.local_t_star(gdir, ref_df=ref_df)
         # read calibration results
@@ -387,7 +393,8 @@ class TestVAScalingModel(unittest.TestCase):
 
         # compare with each other
         assert vas_mustar_refdf == vas_mustar
-        # TODO: this test is failing currently
+        # TODO: this test is currently failing, since the bias computed
+        # via `t_start_from_refmb` does not align with the reference tstar list
         # np.testing.assert_allclose(vas_mustar_refmb['bias'],
         #                            vas_mustar_refdf['bias'], atol=1)
         vas_mustar_refdf.pop('bias')
@@ -395,10 +402,9 @@ class TestVAScalingModel(unittest.TestCase):
         # end of workaround
         assert vas_mustar_refdf == vas_mustar_refmb
         # compare with know values
-        # TODO: tests need revisiting
-        # assert vas_mustar['t_star'] == 1905
-        # assert abs(vas_mustar['mu_star'] - 47.76) <= 0.1
-        # assert abs(vas_mustar['bias'] - 66.12) <= 0.1
+        assert vas_mustar['t_star'] == 1885
+        assert abs(vas_mustar['mu_star'] - 82.73) <= 0.1
+        assert abs(vas_mustar['bias'] - -6.47) <= 0.1
 
     def test_ref_t_stars(self):
         """TODO: write docstring and test"""
@@ -414,7 +420,7 @@ class TestVAScalingModel(unittest.TestCase):
         """
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
         # initialize the GlacierDirectory
         gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
@@ -649,7 +655,6 @@ class TestVAScalingModel(unittest.TestCase):
         assert corrcoef(past_mb, vas_mb) >= 0.94
 
         # relative error of average spec mb
-        # TODO: does this even make any sense?!
         assert np.abs(rel_err(past_mb.mean(), vas_mb.mean())) <= 0.38
 
         # check correlation of positive and negative mb years
@@ -669,7 +674,7 @@ class TestVAScalingModel(unittest.TestCase):
         """
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -731,8 +736,8 @@ class TestVAScalingModel(unittest.TestCase):
         # compute time scales
         model._compute_time_scales()
         # compare to given values
-        np.testing.assert_allclose(model.tau_l, 53., atol=5)
-        np.testing.assert_allclose(model.tau_a, 17., atol=3)
+        np.testing.assert_allclose(model.tau_l, 38., atol=1)
+        np.testing.assert_allclose(model.tau_a, 12., atol=1)
 
     def test_reset(self):
         """Test the method which sets the model back to its initial state."""
@@ -778,7 +783,7 @@ class TestVAScalingModel(unittest.TestCase):
        """
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -889,7 +894,7 @@ class TestVAScalingModel(unittest.TestCase):
         cfg.PARAMS['use_bias_for_run'] = False
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -901,7 +906,9 @@ class TestVAScalingModel(unittest.TestCase):
         # process the given climate file
         climate.process_custom_climate_data(gdir)
         # compute mass balance parameters
-        ref_df = cfg.PARAMS['vas_ref_tstars_rgi5_histalp']
+        fn = 'vas_ref_tstars_rgi6_histalp.csv'
+        fp = vascaling.get_ref_tstars_filepath(fn)
+        ref_df = pd.read_csv(fp)
         vascaling.local_t_star(gdir, ref_df=ref_df)
 
         # define some parameters for the random climate model
@@ -947,7 +954,7 @@ class TestVAScalingModel(unittest.TestCase):
         cfg.PARAMS['use_bias_for_run'] = False
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -959,7 +966,9 @@ class TestVAScalingModel(unittest.TestCase):
         # process the given climate file
         climate.process_custom_climate_data(gdir)
         # compute mass balance parameters
-        ref_df = cfg.PARAMS['vas_ref_tstars_rgi5_histalp']
+        fn = 'vas_ref_tstars_rgi6_histalp.csv'
+        fp = vascaling.get_ref_tstars_filepath(fn)
+        ref_df = pd.read_csv(fp)
         vascaling.local_t_star(gdir, ref_df=ref_df)
 
         # define some parameters for the constant climate model
@@ -998,13 +1007,18 @@ class TestVAScalingModel(unittest.TestCase):
         assert max(rate_n[-300:]) < 0.001
 
     def test_run_until_equilibrium(self):
-        """"""
+        """
+        Note: the oscillating behavior makes this test almost meaningless
+        Returns
+        -------
+
+        """
         # let's not use the mass balance bias since we want to reproduce
         # results from mass balance calibration
         cfg.PARAMS['use_bias_for_run'] = False
 
         # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
         entity = gpd.read_file(hef_file).iloc[0]
 
         # initialize the GlacierDirectory
@@ -1016,7 +1030,9 @@ class TestVAScalingModel(unittest.TestCase):
         # process the given climate file
         climate.process_custom_climate_data(gdir)
         # compute mass balance parameters
-        ref_df = cfg.PARAMS['vas_ref_tstars_rgi5_histalp']
+        fn = 'vas_ref_tstars_rgi6_histalp.csv'
+        fp = vascaling.get_ref_tstars_filepath(fn)
+        ref_df = pd.read_csv(fp)
         vascaling.local_t_star(gdir, ref_df=ref_df)
 
         # instance a constant mass balance model, centred around t*
@@ -1032,17 +1048,17 @@ class TestVAScalingModel(unittest.TestCase):
                                          mb_model=mb_model)
 
         # run glacier with new mass balance model
-        model.run_until_equilibrium(rate=1e-4)
+        model.run_until_equilibrium(rate=1e-5)
 
         # equilibrium should be reached after a couple of 100 years
-        assert model.year <= 300
+        assert model.year <= 600
         # new equilibrium glacier should be smaller (positive temperature bias)
         assert model.volume_m3 < model.volume_m3_0
 
         # run glacier for another 100 years and check volume again
         v_eq = model.volume_m3
         model.run_until(model.year + 100)
-        assert abs(1 - (model.volume_m3/v_eq)) < 0.01
+        assert abs(1 - (model.volume_m3 / v_eq)) < 0.01
 
         # instance a random mass balance model, centred around t*
         mb_model = vascaling.RandomVASMassBalance(gdir)
@@ -1054,3 +1070,7 @@ class TestVAScalingModel(unittest.TestCase):
         # run glacier with random mass balance model
         with self.assertRaises(TypeError):
             model.run_until_equilibrium(rate=1e-4)
+
+    def test_match_regional_geodetic_mb(self):
+        """TODO: write tests and docstring"""
+        pass
