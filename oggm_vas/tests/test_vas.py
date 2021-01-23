@@ -287,7 +287,6 @@ class TestVAScalingModel(unittest.TestCase):
         # consequentially, the average mass input must be less than (or equal
         # to) the mass input integrated over the whole glacier surface, i.e.
         # the mean deviation must be negative, using the OGGM data as reference
-        # TODO: does it actually?! And if so, why?! @ASK
         assert md(prcp_oggm, prcp) <= 0
 
         # correlation must be higher than set threshold
@@ -394,7 +393,8 @@ class TestVAScalingModel(unittest.TestCase):
 
         # compare with each other
         assert vas_mustar_refdf == vas_mustar
-        # TODO: this test is failing currently
+        # TODO: this test is currently failing, since the bias computed
+        # via `t_start_from_refmb` does not align with the reference tstar list
         # np.testing.assert_allclose(vas_mustar_refmb['bias'],
         #                            vas_mustar_refdf['bias'], atol=1)
         vas_mustar_refdf.pop('bias')
@@ -402,10 +402,9 @@ class TestVAScalingModel(unittest.TestCase):
         # end of workaround
         assert vas_mustar_refdf == vas_mustar_refmb
         # compare with know values
-        # TODO: tests need revisiting
-        # assert vas_mustar['t_star'] == 1905
-        # assert abs(vas_mustar['mu_star'] - 47.76) <= 0.1
-        # assert abs(vas_mustar['bias'] - 66.12) <= 0.1
+        assert vas_mustar['t_star'] == 1885
+        assert abs(vas_mustar['mu_star'] - 82.73) <= 0.1
+        assert abs(vas_mustar['bias'] - -6.47) <= 0.1
 
     def test_ref_t_stars(self):
         """TODO: write docstring and test"""
@@ -656,7 +655,6 @@ class TestVAScalingModel(unittest.TestCase):
         assert corrcoef(past_mb, vas_mb) >= 0.94
 
         # relative error of average spec mb
-        # TODO: does this even make any sense?!
         assert np.abs(rel_err(past_mb.mean(), vas_mb.mean())) <= 0.38
 
         # check correlation of positive and negative mb years
@@ -1074,4 +1072,5 @@ class TestVAScalingModel(unittest.TestCase):
             model.run_until_equilibrium(rate=1e-4)
 
     def test_match_regional_geodetic_mb(self):
+        """TODO: write tests and docstring"""
         pass
