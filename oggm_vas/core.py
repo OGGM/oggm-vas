@@ -786,8 +786,8 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
         model_tmp.create_start_glacier(area_m2_start, year_start=_year_start,
                                        adjust_term_elev=_adjust_term_elev)
         # run and compare, return relative error
-        return np.abs(model_tmp.run_and_compare(ref,
-                                                instant_geometry_change=instant_geometry_change))
+        return np.abs(model_tmp.run_and_compare(ref, instant_geometry_change=
+        instant_geometry_change))
 
     # define bounds - between 100m2 and two times the reference size
     area_m2_bounds = [100, 2 * model_ref.area_m2_0]
@@ -1335,6 +1335,110 @@ class VAScalingMassBalance(MassBalanceModel):
                                   'model.')
 
 
+@entity_task(log)
+def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
+                          store_monthly_step=False,
+                          climate_filename='climate_historical',
+                          climate_input_filesuffix='', output_filesuffix='',
+                          init_model_filesuffix=None, init_model_yr=None,
+                          init_area_m2=None, bias=None, **kwargs):
+    """ Runs a glacier with climate input from e.g. CRU or a GCM.
+
+    This will initialize a :py:class:`oggm-vas.core.VAScalingMassBalance` and
+    a :py:class:`oggm-vas.core.VAScalingModel`.
+
+    Parameters
+    ----------
+    gdir : :py:class:`oggm.GlacierDirectory`
+        the glacier directory to process
+    ys : int
+        start year of the model run (default: from the glacier geometry
+        date if init_model_filesuffix is None, else init_model_yr)
+    ye : int
+        end year of the model run (default: last year of the provided
+        climate file)
+    min_ys : int
+        if you want to impose a minimum start year, regardless if the glacier
+        inventory date is earlier (e.g. if climate data does not reach).
+    max_ys : int
+        if you want to impose a maximum start year, regardless if the glacier
+        inventory date is later (e.g. if climate data does not reach).
+    store_monthly_step : bool
+        whether to store the diagnostic data at a monthly time step or not
+        (default is yearly)
+    climate_filename : str
+        name of the climate file, e.g. 'climate_historical' (default) or
+        'gcm_data'
+    climate_input_filesuffix: str
+        filesuffix for the input climate file
+    output_filesuffix : str
+        for the output file
+    init_model_filesuffix : str
+        if you want to start from a previous model run state. Overwrites
+        `init_area_m2`
+    init_area_m2: float, optional
+        glacier area with which the model is initialized, default is RGI value
+    bias : float
+        bias of the mb model. Default is to use the calibrated one, which
+        is often a better idea. For t* experiments it can be useful to set it
+        to zero
+    kwargs : dict
+        kwargs for the VAScalingMassBalance and/or VAScalingModel instances
+    """
+
+    # instance mass balance model
+    mb_mod = VAScalingMassBalance(gdir, bias=bias, filename=climate_filename,
+                                  input_filesuffix=climate_input_filesuffix,
+                                  ys=ys, ye=ye, **kwargs)
+
+    # instance the model
+    min_hgt, max_hgt = get_min_max_elevation(gdir)
+    if init_area_m2 is None:
+        init_area_m2 = gdir.rgi_area_m2
+    model = VAScalingModel(year_0=0, area_m2_0=init_area_m2,
+                           min_hgt=min_hgt, max_hgt=max_hgt,
+                           mb_model=mb_mod)
+
+    # read model from netcdf file if path is given
+    if init_model_filesuffix is not None:
+        fp = gdir.get_filepath('model_daignostics',
+                               filesuffix=init_model_filesuffix)
+        model.read_from_netcdf(fp)
+
+    # Take from rgi date if not set yet
+    if ys is None:
+        try:
+            ys = gdir.rgi_date.year
+        except AttributeError:
+            ys = gdir.rgi_date
+        # The RGI timestamp is in calendar date - we convert to hydro date,
+        # i.e. 2003 becomes 2004 (so that we don't count the MB year 2003
+        # in the simulation)
+        ys += 1
+
+    # Final crop
+    if min_ys is not None:
+        ys = ys if ys > min_ys else min_ys
+    if max_ys is not None:
+        ys = ys if ys < max_ys else max_ys
+
+    # reset model and start year
+    model.reset_year_0(ys)
+
+    if ye is None:
+        # Decide from climate
+        ye = mb_mod.ye
+
+    # specify where to store model diagnostics
+    diag_path = gdir.get_filepath('model_diagnostics',
+                                  filesuffix=output_filesuffix,
+                                  delete=True)
+    # run
+    model.run_until_and_store(year_end=ye, diag_path=diag_path)
+
+    return model
+
+
 class RandomVASMassBalance(MassBalanceModel):
     """Random shuffle of all MB years within a given time period.
 
@@ -1638,10 +1742,6 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
     if temperature_bias is not None:
         # add given temperature bias to mass balance model
         mb_mod.temp_bias = temperature_bias
-
-    # where to store the model output
-    diag_path = gdir.get_filepath('model_diagnostics', filesuffix='vas',
-                                  delete=True)
 
     # instance the model
     min_hgt, max_hgt = get_min_max_elevation(gdir)
@@ -2055,8 +2155,7 @@ class VAScalingModel(object):
 
         """
         if instant_geometry_change:
-            # setting the time scales to 1 year may be usefull for certain usecases
-            # just uncomment the following two lines
+            # setting the time scales to 1 year can be useful
             self.tau_l = 1
             self.tau_a = 1
         else:
@@ -2064,6 +2163,45 @@ class VAScalingModel(object):
             self.tau_l = max(1, (self.volume_m3 / (self.mb_model.prcp_clim
                                                    * self.area_m2)) * factor)
             self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
+
+    def read_from_netcdf(self, path):
+        """ Read the model parameters from a model_diagnostics.nc file
+
+        Parameters
+        ----------
+        path: str
+            path to the *.nc file
+        """
+        with xr.open_dataset(path) as ds:
+            self.year_0 = float(ds.hydro_year[0].values
+                                + (ds.hydro_month[0].values - 1) / 12)
+            self.year = float(ds.hydro_year[-1].values
+                              + (ds.hydro_month[-1].values - 1) / 12)
+
+            # define geometrical/spatial parameters
+            self.area_m2_0 = float(ds.area_m2[0].values)
+            self.area_m2 = float(ds.area_m2[-1].values)
+            self.min_hgt = float(ds.min_hgt[-1].values)
+            self.min_hgt_0 = float(ds.min_hgt[0].values)
+            self.max_hgt = float(ds.max_hgt[0].values)
+
+            # compute volume (m3) and length (m) from area (using scaling laws)
+            self.volume_m3_0 = float(ds.volume_m3[0].values)
+            self.volume_m3 = float(ds.volume_m3[-1].values)
+            self.length_m_0 = float(ds.length_m[0].values)
+            self.length_m = float(ds.length_m[-1].values)
+
+            # define mass balance model and spec mb
+            # self.mb_model = mb_model TODO: is the mb model needed
+            self.spec_mb = float(ds.spec_mb[-1].values)
+            # create geometry change parameters
+            self.dL = float(np.diff(ds.length_m[-2:].values))
+            self.dA = float(np.diff(ds.area_m2[-2:].values))
+            self.dV = float(np.diff(ds.volume_m3[-2:].values))
+
+            # create time scale parameters
+            self.tau_a = float(ds.tau_a[-1].values)
+            self.tau_l = float(ds.tau_l[-1].values)
 
     def reset(self):
         """Set model attributes back to starting values."""
@@ -2084,7 +2222,28 @@ class VAScalingModel(object):
         # create time scale parameters
         self.tau_a = 1
         self.tau_l = 1
-        pass
+
+    def reset_year_0(self, y0=None):
+        """Set model starting attributes to current values."""
+        if y0 is not None:
+            self.year_0 = y0
+        self.year = self.year_0
+        self.length_m_0 = self.length_m
+        self.area_m2_0 = self.area_m2
+        self.volume_m3_0 = self.volume_m3
+        self.min_hgt_0 = self.min_hgt
+
+        # define mass balance model and spec mb
+        self._get_specific_mb()
+
+        # reset geometry change parameters
+        self.dL = 0
+        self.dA = 0
+        self.dV = 0
+
+        # create time scale parameters
+        self.tau_a = 1
+        self.tau_l = 1
 
     def step(self, time_scale_factor=1, instant_geometry_change=False):
         """Advance model glacier by one year. This includes the following:
@@ -2167,8 +2326,8 @@ class VAScalingModel(object):
         return (self.year, self.length_m, self.area_m2,
                 self.volume_m3, self.min_hgt, self.spec_mb)
 
-    def run_until_and_store(self, year_end, diag_path=None, reset=False,
-                            time_scale_factor=1,
+    def run_until_and_store(self, year_end, diag_path=None,
+                            reset=False, time_scale_factor=1,
                             instant_geometry_change=False):
         """Runs the model till the specified year. Returns all relevant
         parameters (i.e. length, area, volume, terminus elevation and specific
@@ -2179,11 +2338,20 @@ class VAScalingModel(object):
         ----------
         year_end : float
             end of modeling period
+        run_path : str, optional
+            path and filename where to store the model run dataset,
+            default = None
         diag_path : str, optional
             path where to store glacier diagnostics, default = None
         reset : bool, optional
             If `True`, the model will start from `year_0`, otherwise from its
             current position in time (default).
+        time_scale_factor: int, optional
+            linear factor with which to scale the internal time scales,
+            default = 1
+        instant_geometry_change: bool, optional
+            flag deciding whether or not to allow for instant (i.e., yearly)
+            geometry changes, neglecting potential response times
 
         Returns
         -------
@@ -2192,12 +2360,10 @@ class VAScalingModel(object):
 
         """
         # reset parameters to starting values
-        # TODO: is this OGGM compatible
         if reset:
             self.reset()
 
         # check validity of end year
-        # TODO: find out how OGGM handles this
         if year_end < self.year:
             raise ValueError('Cannot run until {}, already at year {}'.format(
                 year_end, self.year))
@@ -2278,6 +2444,9 @@ class VAScalingModel(object):
         diag_ds['min_hgt'] = ('time', np.zeros(nm) * np.NaN)
         diag_ds['min_hgt'].attrs['description'] = 'Terminus elevation'
         diag_ds['min_hgt'].attrs['unit'] = 'm asl.'
+        diag_ds['max_hgt'] = ('time', np.zeros(nm) * np.NaN)
+        diag_ds['max_hgt'].attrs['description'] = 'Maximum surface elevation'
+        diag_ds['max_hgt'].attrs['unit'] = 'm asl.'
         diag_ds['tau_l'] = ('time', np.zeros(nm) * np.NaN)
         diag_ds['tau_l'].attrs['description'] = 'Length change response time'
         diag_ds['tau_l'].attrs['unit'] = 'years'
@@ -2296,6 +2465,7 @@ class VAScalingModel(object):
             diag_ds['length_m'].data[i] = self.length_m
             diag_ds['spec_mb'].data[i] = self.spec_mb
             diag_ds['min_hgt'].data[i] = self.min_hgt
+            diag_ds['max_hgt'].data[i] = self.max_hgt
             diag_ds['tau_l'].data[i] = self.tau_l
             diag_ds['tau_a'].data[i] = self.tau_a
 
@@ -2411,8 +2581,10 @@ class VAScalingModel(object):
         # run model and store area
         year, _, area, _, _, _ = self.run_until(year_end=model_ref.year,
                                                 reset=True,
-                                                time_scale_factor=time_scale_factor,
-                                                instant_geometry_change=instant_geometry_change)
+                                                time_scale_factor=
+                                                time_scale_factor,
+                                                instant_geometry_change=
+                                                instant_geometry_change)
         assert year == model_ref.year
         # compute relative difference to reference area
         rel_error = 1 - area / model_ref.area_m2
