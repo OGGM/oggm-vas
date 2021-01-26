@@ -1391,20 +1391,6 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
                                   input_filesuffix=climate_input_filesuffix,
                                   ys=ys, ye=ye, **kwargs)
 
-    # instance the model
-    min_hgt, max_hgt = get_min_max_elevation(gdir)
-    if init_area_m2 is None:
-        init_area_m2 = gdir.rgi_area_m2
-    model = VAScalingModel(year_0=0, area_m2_0=init_area_m2,
-                           min_hgt=min_hgt, max_hgt=max_hgt,
-                           mb_model=mb_mod)
-
-    # read model from netcdf file if path is given
-    if init_model_filesuffix is not None:
-        fp = gdir.get_filepath('model_daignostics',
-                               filesuffix=init_model_filesuffix)
-        model.read_from_netcdf(fp)
-
     # Take from rgi date if not set yet
     if ys is None:
         try:
@@ -1421,6 +1407,20 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
         ys = ys if ys > min_ys else min_ys
     if max_ys is not None:
         ys = ys if ys < max_ys else max_ys
+
+    # instance the model
+    min_hgt, max_hgt = get_min_max_elevation(gdir)
+    if init_area_m2 is None:
+        init_area_m2 = gdir.rgi_area_m2
+    model = VAScalingModel(year_0=ys, area_m2_0=init_area_m2,
+                           min_hgt=min_hgt, max_hgt=max_hgt,
+                           mb_model=mb_mod)
+
+    # read model from netcdf file if path is given
+    if init_model_filesuffix is not None:
+        fp = gdir.get_filepath('model_diagnostics',
+                               filesuffix=init_model_filesuffix)
+        model.read_from_netcdf(fp)
 
     # reset model and start year
     model.reset_year_0(ys)
