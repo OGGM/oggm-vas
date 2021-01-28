@@ -1389,34 +1389,16 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
         kwargs for the VAScalingMassBalance and/or VAScalingModel instances
     """
 
-    # instance mass balance model
-    mb_mod = VAScalingMassBalance(gdir, bias=bias, filename=climate_filename,
-                                  input_filesuffix=climate_input_filesuffix,
-                                  ys=ys, ye=ye, **kwargs)
-
-    # get neede values
-    min_hgt, max_hgt = get_min_max_elevation(gdir)
-    if init_area_m2 is None:
-        init_area_m2 = gdir.rgi_area_m2
-    # instance the model with ys from mass balance model
-    year_0 = mb_mod.ys if ys is None else ys
-    model = VAScalingModel(year_0=year_0, area_m2_0=init_area_m2,
-                           min_hgt=min_hgt, max_hgt=max_hgt,
-                           mb_model=mb_mod)
-
-
+    # Initialize model from previous run if filesuffix is specified
     if init_model_filesuffix is not None:
-        # read model from netcdf file if path is given
         fp = gdir.get_filepath('model_diagnostics',
                                filesuffix=init_model_filesuffix)
-        model.read_from_netcdf(fp)
-        # reset model and start year
-        if init_model_yr is None:
-            init_model_yr = model.year
-        model.reset_year_0(init_model_year)
-        # use end of "spinup" as start year for new simulation
-        if ys is None:
-            ys = init_model_yr
+        with FileModel(fp) as fmod:
+            if init_model_yr is None:
+                init_model_yr = fmod.last_yr
+            fmod.run_until(init_model_yr)
+            if ys is None:
+                ys = init_model_yr
 
     # Take from rgi date if not set yet
     if ys is None:
@@ -1435,11 +1417,38 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     if max_ys is not None:
         ys = ys if ys < max_ys else max_ys
 
-
+    # instance mass balance model
+    mb_mod = VAScalingMassBalance(gdir, bias=bias, filename=climate_filename,
+                                  input_filesuffix=climate_input_filesuffix,
+                                  ys=ys, ye=ye, **kwargs)
 
     if ye is None:
         # Decide from climate
         ye = mb_mod.ye
+
+    # get needed values
+    min_hgt, max_hgt = get_min_max_elevation(gdir)
+    if init_area_m2 is None:
+        init_area_m2 = gdir.rgi_area_m2
+    # instance the model with ys from mass balance model
+    year_0 = mb_mod.ys if ys is None else ys
+    model = VAScalingModel(year_0=year_0, area_m2_0=init_area_m2,
+                           min_hgt=min_hgt, max_hgt=max_hgt,
+                           mb_model=mb_mod)
+
+    # INITIAL VERSION without FileModel... to be deleted
+    # if init_model_filesuffix is not None:
+    #     # read model from netcdf file if path is given
+    #     fp = gdir.get_filepath('model_diagnostics',
+    #                            filesuffix=init_model_filesuffix)
+    #     model.read_from_netcdf(fp)
+    #     # reset model and start year
+    #     if init_model_yr is None:
+    #         init_model_yr = model.year
+    #     model.reset_year_0(init_model_yr)
+    #     # use end of "spinup" as start year for new simulation
+    #     if ys is None:
+    #         ys = init_model_yr
 
     # specify where to store model diagnostics
     diag_path = gdir.get_filepath('model_diagnostics',
@@ -2726,7 +2735,7 @@ class FileModel(object):
         from the *.nc file. """
         # adjust date according to the hydrological floating year convention
         if month is not None:
-            year += (month-1)/12
+            year += (month - 1) / 12
         # select given date from the *.nc file
         ds_sel = self.ds.sel(time=year)
 
@@ -2747,4 +2756,3 @@ class FileModel(object):
         # create time scale parameters
         self.tau_a = float(ds_sel.tau_a.values)
         self.tau_l = float(ds_sel.tau_l.values)
-
