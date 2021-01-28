@@ -2176,6 +2176,18 @@ class VAScalingModel(object):
                                                    * self.area_m2)) * factor)
             self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
 
+    @property
+    def volume_km3(self):
+        return self.volume_m3 * 1e-9
+
+    @property
+    def area_km2(self):
+        return self.area_m2 * 1e-6
+
+    @property
+    def length_km(self):
+        return self.length_m * 1e-3
+
     def read_from_netcdf(self, path):
         """ Read the model parameters from a model_diagnostics.nc file
 
@@ -2185,10 +2197,7 @@ class VAScalingModel(object):
             path to the *.nc file
         """
         with xr.open_dataset(path) as ds:
-            self.year_0 = float(ds.hydro_year[0].values
-                                + (ds.hydro_month[0].values - 1) / 12)
-            self.year = float(ds.hydro_year[-1].values
-                              + (ds.hydro_month[-1].values - 1) / 12)
+            self.year_0 = float(ds.time[0].values)
 
             # define geometrical/spatial parameters
             self.area_m2_0 = float(ds.area_m2[0].values)
@@ -2204,7 +2213,6 @@ class VAScalingModel(object):
             self.length_m = float(ds.length_m[-1].values)
 
             # define mass balance model and spec mb
-            # self.mb_model = mb_model TODO: is the mb model needed
             self.spec_mb = float(ds.spec_mb[-1].values)
             # create geometry change parameters
             self.dL = float(np.diff(ds.length_m[-2:].values))
@@ -2609,3 +2617,134 @@ class VAScalingModel(object):
 
         """
         raise NotImplementedError
+
+
+class FileModel(object):
+    """Duck VAS model which actually reads the stuff out of a *.nc file."""
+
+    def __init__(self, path):
+        """Instance from file path"""
+
+        ds = xr.open_dataset(path)
+        ds.load()
+
+        try:
+            self.last_yr = ds.time.values[-1]
+        except AttributeError:
+            err_msg = 'The provided model output file is incomplete (likely ' \
+                      'when the previous run failed) or corrupt.'
+            raise oggm.exceptions.InvalidWorkflowError(err_msg)
+
+        self.ds = ds
+
+        self.year_0 = float(ds.time[0].values)
+
+        # get initial geometrical/spatial parameters
+        self.length_m_0 = float(ds.length_m[0].values)
+        self.area_m2_0 = float(ds.area_m2[0].values)
+        self.volume_m3_0 = float(ds.volume_m3[0].values)
+        self.min_hgt_0 = float(ds.min_hgt[0].values)
+        self.max_hgt = float(ds.max_hgt[0].values)
+
+        # set yearly values to initial values
+        self.year = self.year_0
+        self.length_m = self.length_m_0
+        self.area_m2 = self.area_m2_0
+        self.volume_m3 = self.volume_m3_0
+        self.min_hgt = self.min_hgt_0
+
+        # define mass balance model and spec mb
+        self.spec_mb = float(self.ds.spec_mb[0].values)
+
+        # reset geometry change parameters
+        self.dL = 0
+        self.dA = 0
+        self.dV = 0
+
+        # create time scale parameters
+        self.tau_a = 1
+        self.tau_l = 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.ds.close()
+
+    def reset(self):
+        """Set model attributes back to starting values."""
+        self.year = self.year_0
+        self.length_m = self.length_m_0
+        self.area_m2 = self.area_m2_0
+        self.volume_m3 = self.volume_m3_0
+        self.min_hgt = self.min_hgt_0
+
+        # define mass balance model and spec mb
+        self.spec_mb = float(self.ds.spec_mb[0].values)
+
+        # reset geometry change parameters
+        # self.dL = 0
+        # self.dA = 0
+        # self.dV = 0
+
+        # create time scale parameters
+        self.tau_a = 1
+        self.tau_l = 1
+
+    def reset_year_0(self, y0=None):
+        """Reset the initial model to the given year time"""
+        if y0 is None:
+            # if no year is given, fallback to self.reset()
+            self.reset()
+            return
+
+        # get values from given year
+        self.run_until(y0)
+        # define current year and state as initial state
+        self.year_0 = self.y0
+        self.length_m_0 = self.length_m
+        self.area_m2_0 = self.area_m2
+        self.volume_m3_0 = self.volume_m3
+        self.min_hgt_0 = self.min_hgt
+        self.tau_a = 1
+        self.tau_l = 1
+
+    @property
+    def volume_km3(self):
+        return self.volume_m3 * 1e-9
+
+    @property
+    def area_km2(self):
+        return self.area_m2 * 1e-6
+
+    @property
+    def length_km(self):
+        return self.length_m * 1e-3
+
+    def run_until(self, year=None, month=None):
+        """Mimics the model's behavior by reading the values of the given year
+        from the *.nc file. """
+        # adjust date according to the hydrological floating year convention
+        if month is not None:
+            year += (month-1)/12
+        # select given date from the *.nc file
+        ds_sel = self.ds.sel(time=year)
+
+        # get relevant parameters
+        self.year = float(ds_sel.time)
+
+        # define geometrical/spatial parameters
+        self.area_m2 = float(ds_sel.area_m2.values)
+        self.min_hgt = float(ds_sel.min_hgt.values)
+
+        # compute volume (m3) and length (m) from area (using scaling laws)
+        self.volume_m3 = float(ds_sel.volume_m3.values)
+        self.length_m = float(ds_sel.length_m.values)
+
+        # define mass balance model and spec mb
+        self.spec_mb = float(ds_sel.spec_mb.values)
+
+        # create time scale parameters
+        self.tau_a = float(ds_sel.tau_a.values)
+        self.tau_l = float(ds_sel.tau_l.values)
+
