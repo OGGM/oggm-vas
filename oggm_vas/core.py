@@ -54,22 +54,22 @@ def initialize(**kwargs):
     cfg.initialize(**kwargs)
 
     # area-volume scaling parameters for glaciers (cp. Marzeion et. al., 2012)
-    # units: m^(3-2*gamma) and unitless, respectively
+    # units: m^(3-2*gamma) and without unit, respectively
     cfg.PARAMS['vas_c_area_m2'] = 0.1912
     cfg.PARAMS['vas_gamma_area'] = 1.375
 
     # area-length scaling parameters for glaciers (cp. Marzeion et. al., 2012)
-    # units: m^(3-q) and unitless, respectively
+    # units: m^(3-q) and without unit, respectively
     cfg.PARAMS['vas_c_length_m'] = 4.5214
     cfg.PARAMS['vas_q_length'] = 2.2
 
-    # area-volume scaling parameters for glaciers (cp. Marzeion et. al., 2012)
-    # units: m^(3-2*gamma) and unitless, respectively
+    # area-volume scaling parameters for ice caps (cp. Marzeion et. al., 2012)
+    # units: m^(3-2*gamma) and without unit, respectively
     cfg.PARAMS['vas_c_icecap_area_m2'] = 1.7013
     cfg.PARAMS['vas_gamma_icecap_area'] = 1.25
 
-    # area-length scaling parameters for glaciers (cp. Marzeion et. al., 2012)
-    # units: m^(3-q) and unitless, respectively
+    # area-length scaling parameters for ice caps (cp. Marzeion et. al., 2012)
+    # units: m^(3-q) and without unit, respectively
     cfg.PARAMS['vas_c_icecap_length_m'] = 7.1214
     cfg.PARAMS['vas_q_icecap_length'] = 2.5
 
@@ -216,11 +216,11 @@ def get_scaling_constant(gdirs):
     """ The scaling constants (c_l and c_a for volume/length and volume/area
     scaling respectively) are random variables and vary from glacier to
     glacier. This function computes these constants for the given glaciers,
-    based on the RGI area, the inversion volume and the flowline length.
-    Returns dictionary with parameters
+    based on the RGI area, the inversion volume and the flowline length. Works
+    for glaciers and ice caps equally. Returns dictionary with parameters.
 
-    NOTE: The scaling constants are theoretically not independent of each other.
-    Here, the scaling constants are separately estimated via a linear
+    NOTE: The scaling constants are theoretically not independent of each
+    other. Here, the scaling constants are estimated separately via a linear
     regression. So don't expect to get the same volume if you apply V/A scaling
     and V/L scaling to the same glacier.
 
@@ -258,10 +258,11 @@ def get_scaling_constant(gdirs):
     return {'c_l': c_l, 'c_a': c_a}
 
 
-def get_scaling_constant_exponent(gdirs):
+def get_scaling_constant_exponent(gdirs, glacier_type='Glacier'):
     """ Compute scaling constants and exponent from a linear regression in
     log-log space. Returns scaling constant, scaling exponent and r squared
     for the volume/length scaling and volume/area scaling in dictionary.
+    This can be done for all glaciers or all ice caps
 
     NOTE: The scaling parameters are theoretically not independent of each
     other. Here, they are separately estimated via a linear regression. So
@@ -271,6 +272,8 @@ def get_scaling_constant_exponent(gdirs):
     Parameters
     ----------
     gdirs : list of :py:class:`oggm.GlacierDirectory` objects
+    glacier_type: str, optional, default='Glacier
+        select between glaciers and ice caps
 
     Returns
     -------
@@ -288,11 +291,17 @@ def get_scaling_constant_exponent(gdirs):
               for gs in glacier_stats]
     area = [gs.get('rgi_area_km2', np.NaN) * 1e6 for gs in glacier_stats]
     volume = [gs.get('inv_volume_km3', np.NaN) * 1e9 for gs in glacier_stats]
+    glacier_type_list = [gs.get('glacier_type', np.NaN) for gs in
+                         glacier_stats]
     # create DataFrame
-    df = pd.DataFrame({'length': length, 'area': area, 'volume': volume},
+    df = pd.DataFrame({'length': length, 'area': area, 'volume': volume,
+                       'glacier_type': glacier_type_list},
                       index=pd.Index(rgi_id, name='rgi_id'))
     # drop glaciers where one of the geometries is missing
     df = df.dropna()
+    # select for glaciers or ice caps
+    df = df[df.glacier_type == glacier_type]
+
     # volume/length linear regression in log-log space
     x = np.log(df.length.values).reshape(-1, 1)
     y = np.log(df.volume.values)
@@ -301,6 +310,7 @@ def get_scaling_constant_exponent(gdirs):
     c_l = np.exp(lin_mod.intercept_)
     q = lin_mod.coef_[0]
     r_sq_l = lin_mod.score(x, y)
+
     # volume/area linear regression in log-log space
     x = np.log(df.area.values).reshape(-1, 1)
     y = np.log(df.volume.values)
@@ -789,13 +799,15 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
                                    area_m2_0=ref.area_m2_0,
                                    min_hgt=ref.min_hgt_0,
                                    max_hgt=ref.max_hgt,
-                                   mb_model=ref.mb_model)
+                                   mb_model=ref.mb_model,
+                                   glacier_type=gdir.glacier_type)
         # scale to desired starting size
         model_tmp.create_start_glacier(area_m2_start, year_start=_year_start,
                                        adjust_term_elev=_adjust_term_elev)
         # run and compare, return relative error
-        return np.abs(model_tmp.run_and_compare(ref, instant_geometry_change=
-        instant_geometry_change))
+        return np.abs(model_tmp.run_and_compare(ref,
+                                                instant_geometry_change=
+                                                instant_geometry_change))
 
     # define bounds - between 100m2 and two times the reference size
     area_m2_bounds = [100, 2 * model_ref.area_m2_0]
@@ -1442,21 +1454,7 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     year_0 = mb_mod.ys if ys is None else ys
     model = VAScalingModel(year_0=year_0, area_m2_0=init_area_m2,
                            min_hgt=min_hgt, max_hgt=max_hgt,
-                           mb_model=mb_mod)
-
-    # INITIAL VERSION without FileModel... to be deleted
-    # if init_model_filesuffix is not None:
-    #     # read model from netcdf file if path is given
-    #     fp = gdir.get_filepath('model_diagnostics',
-    #                            filesuffix=init_model_filesuffix)
-    #     model.read_from_netcdf(fp)
-    #     # reset model and start year
-    #     if init_model_yr is None:
-    #         init_model_yr = model.year
-    #     model.reset_year_0(init_model_yr)
-    #     # use end of "spinup" as start year for new simulation
-    #     if ys is None:
-    #         ys = init_model_yr
+                           mb_model=mb_mod, glacier_type=gdir.glacier_type)
 
     # specify where to store model diagnostics
     diag_path = gdir.get_filepath('model_diagnostics',
@@ -2106,7 +2104,8 @@ class VAScalingModel(object):
                + "min elev [m asl.]: {:.0f}\n".format(self.min_hgt) \
                + "spec mb [mm w.e. yr-1]: {:.2f}".format(self.spec_mb)
 
-    def __init__(self, year_0, area_m2_0, min_hgt, max_hgt, mb_model):
+    def __init__(self, year_0, area_m2_0, min_hgt, max_hgt, mb_model,
+                 glacier_type='Glacier'):
         """Instance new glacier model.
 
         year_0: float
@@ -2119,18 +2118,32 @@ class VAScalingModel(object):
             maximal glacier surface elevation at year_0 [m asl.]
         mb_model: :py:class:`oggm-vas.VAScalingMassBalance`
             instance of mass balance model
+        glacier_type: str, optional, default='Glacier'
+            specify whether to use 'Glacier' or 'Ice cap' scaling parameters
         """
 
         # get constants from cfg.PARAMS
         self.rho = cfg.PARAMS['ice_density']
 
-        # get scaling constants
-        self.cl = cfg.PARAMS['vas_c_length_m']
-        self.ca = cfg.PARAMS['vas_c_area_m2']
+        # gets scaling parameters depending on the glacier type
+        if glacier_type == 'Glacier':
+            # get scaling constants
+            self.cl = cfg.PARAMS['vas_c_length_m']
+            self.ca = cfg.PARAMS['vas_c_area_m2']
+            # get scaling exponents
+            self.ql = cfg.PARAMS['vas_q_length']
+            self.gamma = cfg.PARAMS['vas_gamma_area']
+        elif glacier_type == 'Ice cap':
+            # get scaling constants
+            self.cl = cfg.PARAMS['vas_c_icecap_length_m']
+            self.ca = cfg.PARAMS['vas_c_icecap_area_m2']
+            # get scaling exponents
+            self.ql = cfg.PARAMS['vas_q_icecap_length']
+            self.gamma = cfg.PARAMS['vas_gamma_icecap_area']
+        else:
+            ValueError("Glacier type can only be 'Glacier' or 'Ice cap'.")
 
-        # get scaling exponents
-        self.ql = cfg.PARAMS['vas_q_length']
-        self.gamma = cfg.PARAMS['vas_gamma_area']
+        self.glacier_type = glacier_type
 
         # define temporal index
         self.year_0 = year_0
@@ -2216,29 +2229,30 @@ class VAScalingModel(object):
         with xr.open_dataset(path) as ds:
             self.year_0 = float(ds.time[0].values)
 
-            # define geometrical/spatial parameters
+            # get geometrical/spatial parameters
             self.area_m2_0 = float(ds.area_m2[0].values)
             self.area_m2 = float(ds.area_m2[-1].values)
             self.min_hgt = float(ds.min_hgt[-1].values)
             self.min_hgt_0 = float(ds.min_hgt[0].values)
             self.max_hgt = float(ds.max_hgt[0].values)
-
-            # compute volume (m3) and length (m) from area (using scaling laws)
             self.volume_m3_0 = float(ds.volume_m3[0].values)
             self.volume_m3 = float(ds.volume_m3[-1].values)
             self.length_m_0 = float(ds.length_m[0].values)
             self.length_m = float(ds.length_m[-1].values)
 
-            # define mass balance model and spec mb
-            self.spec_mb = float(ds.spec_mb[-1].values)
-            # create geometry change parameters
+            # get geometry change parameters
             self.dL = float(np.diff(ds.length_m[-2:].values))
             self.dA = float(np.diff(ds.area_m2[-2:].values))
             self.dV = float(np.diff(ds.volume_m3[-2:].values))
 
-            # create time scale parameters
+            # get specific mass balance
+            self.spec_mb = float(ds.spec_mb[-1].values)
+
+            # get time scale parameters
             self.tau_a = float(ds.tau_a[-1].values)
             self.tau_l = float(ds.tau_l[-1].values)
+
+            # TODO: read/write glacier type and scaling parameters?!
 
     def reset(self):
         """Set model attributes back to starting values."""
@@ -2293,7 +2307,8 @@ class VAScalingModel(object):
         """
         # compute time scales
         self._compute_time_scales(factor=time_scale_factor,
-                                  instant_geometry_change=instant_geometry_change)
+                                  instant_geometry_change=
+                                  instant_geometry_change)
 
         # get specific mass balance B(t)
         self._get_specific_mb()
@@ -2491,6 +2506,7 @@ class VAScalingModel(object):
         diag_ds['tau_a'].attrs['description'] = 'Area change response time'
         diag_ds['tau_a'].attrs['unit'] = 'years'
         # TODO: handel tidewater glaciers
+        # TODO: write glacier type and scaling parameters?!
 
         # run the model
         for i, yr in enumerate(monthly_time):
