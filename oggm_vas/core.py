@@ -55,15 +55,23 @@ def initialize(**kwargs):
 
     # area-volume scaling parameters for glaciers (cp. Marzeion et. al., 2012)
     # units: m^(3-2*gamma) and unitless, respectively
-    cfg.PARAMS['vas_c_area_m2'] = 0.191
+    cfg.PARAMS['vas_c_area_m2'] = 0.1912
     cfg.PARAMS['vas_gamma_area'] = 1.375
 
     # area-length scaling parameters for glaciers (cp. Marzeion et. al., 2012)
     # units: m^(3-q) and unitless, respectively
-    cfg.PARAMS['vas_c_length_m'] = 4.5507
+    cfg.PARAMS['vas_c_length_m'] = 4.5214
     cfg.PARAMS['vas_q_length'] = 2.2
 
-    # TODO: include scaling parameters for ice caps?!
+    # area-volume scaling parameters for glaciers (cp. Marzeion et. al., 2012)
+    # units: m^(3-2*gamma) and unitless, respectively
+    cfg.PARAMS['vas_c_icecap_area_m2'] = 1.7013
+    cfg.PARAMS['vas_gamma_icecap_area'] = 1.25
+
+    # area-length scaling parameters for glaciers (cp. Marzeion et. al., 2012)
+    # units: m^(3-q) and unitless, respectively
+    cfg.PARAMS['vas_c_icecap_length_m'] = 7.1214
+    cfg.PARAMS['vas_q_icecap_length'] = 2.5
 
 
 def get_ref_tstars_filepath(fname):
