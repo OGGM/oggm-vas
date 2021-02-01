@@ -2196,12 +2196,12 @@ class VAScalingModel(object):
         instant_geometry_change: bool, optional, default=False
 
         """
-        if instant_geometry_change:
+        if instant_geometry_change or self.volume_m3 == 0 or self.area_m2 == 0:
             # setting the time scales to 1 year can be useful
             self.tau_l = 1
             self.tau_a = 1
         else:
-            # compute time scales following Marzeion et al
+            # compute time scales following Marzeion et al. 2020
             self.tau_l = max(1, (self.volume_m3 / (self.mb_model.prcp_clim
                                                    * self.area_m2)) * factor)
             self.tau_a = max(1, self.tau_l * self.area_m2 / self.length_m ** 2)
@@ -2316,18 +2316,18 @@ class VAScalingModel(object):
         # compute volume change dV(t)
         self.dV = self.area_m2 * self.spec_mb / self.rho
         # compute new volume V(t+1)
-        self.volume_m3 += self.dV
+        self.volume_m3 = max(0, self.volume_m3 + self.dV)
 
         # compute area change dA(t)
         self.dA = ((self.volume_m3 / self.ca) ** (1 / self.gamma)
                    - self.area_m2) / self.tau_a
         # compute new area A(t+1)
-        self.area_m2 += self.dA
+        self.area_m2 = max(0, self.area_m2 + self.dA)
         # compute length change dL(t)
         self.dL = ((self.volume_m3 / self.cl) ** (1 / self.ql)
                    - self.length_m) / self.tau_l
         # compute new length L(t+1)
-        self.length_m += self.dL
+        self.length_m += max(0, self.length_m + self.dL)
         # compute new terminus elevation min_hgt(t+1)
         self.min_hgt = self.max_hgt + (self.length_m / self.length_m_0
                                        * (self.min_hgt_0 - self.max_hgt))
