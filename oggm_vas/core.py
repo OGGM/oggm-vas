@@ -2327,7 +2327,7 @@ class VAScalingModel(object):
         self.dL = ((self.volume_m3 / self.cl) ** (1 / self.ql)
                    - self.length_m) / self.tau_l
         # compute new length L(t+1)
-        self.length_m += max(0, self.length_m + self.dL)
+        self.length_m = max(0, self.length_m + self.dL)
         # compute new terminus elevation min_hgt(t+1)
         self.min_hgt = self.max_hgt + (self.length_m / self.length_m_0
                                        * (self.min_hgt_0 - self.max_hgt))
