@@ -1400,7 +1400,8 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
         the year of the initial run you want to start from. The default
         is to take the last year of the simulation.
     init_area_m2: float, optional
-        glacier area with which the model is initialized, default is RGI value
+        glacier area with which the model is initialized, default is RGI value,
+        gets overwriten by init_model_filesuffix
     bias : float
         bias of the mb model. Default is to use the calibrated one, which
         is often a better idea. For t* experiments it can be useful to set it
@@ -1446,15 +1447,18 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
         # Decide from climate
         ye = mb_mod.ye
 
-    # get needed values
+    # get needed values from glacier directory
     min_hgt, max_hgt = get_min_max_elevation(gdir)
     if init_area_m2 is None:
         init_area_m2 = gdir.rgi_area_m2
-    # instance the model with ys from mass balance model
-    year_0 = mb_mod.ys if ys is None else ys
-    model = VAScalingModel(year_0=year_0, area_m2_0=init_area_m2,
+
+    # instance the model
+    model = VAScalingModel(year_0=ys, area_m2_0=init_area_m2,
                            min_hgt=min_hgt, max_hgt=max_hgt,
                            mb_model=mb_mod, glacier_type=gdir.glacier_type)
+    if fmod:
+        # set initial state accordingly
+        model.reset_from_filemodel(fmod)
 
     # specify where to store model diagnostics
     diag_path = gdir.get_filepath('model_diagnostics',
@@ -2252,8 +2256,6 @@ class VAScalingModel(object):
             self.tau_a = float(ds.tau_a[-1].values)
             self.tau_l = float(ds.tau_l[-1].values)
 
-            # TODO: read/write glacier type and scaling parameters?!
-
     def reset(self):
         """Set model attributes back to starting values."""
         self.year = self.year_0
@@ -2295,6 +2297,35 @@ class VAScalingModel(object):
         # create time scale parameters
         self.tau_a = 1
         self.tau_l = 1
+
+    def reset_from_filemodel(self, fmod):
+        """
+
+        Parameters
+        ----------
+        fmod
+
+        """
+        # get relevant parameters
+        self.year = fmod.year
+
+        # define geometrical/spatial parameters
+        self.area_m2 = fmod.area_m2
+        self.min_hgt = fmod.min_hgt
+
+        # compute volume (m3) and length (m) from area (using scaling laws)
+        self.volume_m3 = fmod.volume_m3
+        self.length_m = fmod.length_m
+
+        # define mass balance model and spec mb
+        self.spec_mb = fmod.spec_mb
+
+        # create time scale parameters
+        self.tau_a = fmod.tau_a
+        self.tau_l = fmod.tau_l
+
+        # reset initial values
+        self.reset_year_0(y0=self.year)
 
     def step(self, time_scale_factor=1, instant_geometry_change=False):
         """Advance model glacier by one year. This includes the following:
