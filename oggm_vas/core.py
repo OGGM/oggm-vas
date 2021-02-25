@@ -980,10 +980,10 @@ def match_regional_geodetic_mb(gdirs, rgi_reg):
     # log.workflow('OGGM frontal ablation gives {}'.format(out_cal))
     for gdir in gdirs:
         try:
-            df = gdir.read_json('local_mustar')
+            df = gdir.read_json('vascaling_mustar')
             gdir.add_to_diagnostics('mb_bias_before_geodetic_corr', df['bias'])
             df['bias'] = df['bias'] - residual
-            gdir.write_json(df, 'local_mustar')
+            gdir.write_json(df, 'vascaling_mustar')
         except FileNotFoundError:
             pass
 
@@ -1414,12 +1414,14 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     if init_model_filesuffix is not None:
         fp = gdir.get_filepath('model_diagnostics',
                                filesuffix=init_model_filesuffix)
-        with FileModel(fp) as fmod:
-            if init_model_yr is None:
-                init_model_yr = fmod.last_yr
-            fmod.run_until(init_model_yr)
-            if ys is None:
-                ys = init_model_yr
+        fmod =  FileModel(fp)
+        if init_model_yr is None:
+            init_model_yr = fmod.last_yr
+        fmod.run_until(init_model_yr)
+        if ys is None:
+            ys = init_model_yr
+    else:
+        fmod = None
 
     # Take from rgi date if not set yet
     if ys is None:
@@ -1459,6 +1461,7 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     if fmod:
         # set initial state accordingly
         model.reset_from_filemodel(fmod)
+        fmod.__exit__()
 
     # specify where to store model diagnostics
     diag_path = gdir.get_filepath('model_diagnostics',
