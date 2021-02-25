@@ -1461,7 +1461,6 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     if fmod:
         # set initial state accordingly
         model.reset_from_filemodel(fmod)
-        fmod.__exit__()
 
     # specify where to store model diagnostics
     diag_path = gdir.get_filepath('model_diagnostics',
