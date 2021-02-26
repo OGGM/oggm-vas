@@ -763,6 +763,7 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
     a_rgi = gdir.rgi_area_m2
     rgi_df = utils.get_rgi_glacier_entities([gdir.rgi_id])
     y_rgi = int(rgi_df.BgnDate.values[0][:4])
+    y_rgi += 1
     # get min and max glacier surface elevation
     h_min, h_max = get_min_max_elevation(gdir)
 
@@ -1412,14 +1413,16 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
 
     # Initialize model from previous run if filesuffix is specified
     if init_model_filesuffix is not None:
+        # read the given model run and create a dummy model
         fp = gdir.get_filepath('model_diagnostics',
                                filesuffix=init_model_filesuffix)
-        fmod =  FileModel(fp)
+        fmod = FileModel(fp)
+
         if init_model_yr is None:
+            # start with last year of initialization run if not specified
             init_model_yr = fmod.last_yr
         fmod.run_until(init_model_yr)
-        if ys is None:
-            ys = init_model_yr
+        ys = init_model_yr
     else:
         fmod = None
 
@@ -1461,6 +1464,98 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     if fmod:
         # set initial state accordingly
         model.reset_from_filemodel(fmod)
+
+    # specify where to store model diagnostics
+    diag_path = gdir.get_filepath('model_diagnostics',
+                                  filesuffix=output_filesuffix,
+                                  delete=True)
+    # run
+    model.run_until_and_store(year_end=ye, diag_path=diag_path)
+
+    return model
+
+
+@entity_task(log)
+def run_historic_from_climate_data(gdir, ys, ye=None,
+                                   climate_filename='climate_historical',
+                                   climate_input_filesuffix='',
+                                   output_filesuffix='',
+                                   bias=None, **kwargs):
+    """ Runs a glacier with climate input from the given start year ys. Thereby
+    the glacier model is initialized so that the glacier area equals the RGI
+    area at the RGI date. If the RGI date is before the start year the model
+    starts at that year (can be cropped afterwards).
+
+    TODO: this is a quick fix, should be revised at some point
+
+    This will initialize a :py:class:`oggm-vas.core.VAScalingMassBalance` and
+    a :py:class:`oggm-vas.core.VAScalingModel`.
+
+    Parameters
+    ----------
+    gdir : :py:class:`oggm.GlacierDirectory`
+        the glacier directory to process
+    ys : int
+        start year of the model run (default: from the glacier geometry
+        date if init_model_filesuffix is None, else init_model_yr)
+    ye : int
+        end year of the model run (default: last year of the provided
+        climate file)
+    climate_filename : str
+        name of the climate file, e.g. 'climate_historical' (default) or
+        'gcm_data'
+    climate_input_filesuffix: str
+        filesuffix for the input climate file
+    output_filesuffix : str
+        for the output file
+    bias : float
+        bias of the mb model. Default is to use the calibrated one, which
+        is often a better idea. For t* experiments it can be useful to set it
+        to zero
+    kwargs : dict
+        kwargs for the VAScalingMassBalance and/or VAScalingModel instances
+    """
+
+    # get RGI date
+    try:
+        rgi_date = gdir.rgi_date.year
+    except AttributeError:
+        rgi_date = gdir.rgi_date
+    # The RGI timestamp is in calendar date - we convert to hydro date,
+    # i.e. 2003 becomes 2004 (so that we don't count the MB year 2003
+    # in the simulation)
+    rgi_date += 1
+
+    # start from RGI date if it is before the desired start year
+    if rgi_date < ys:
+        ys = rgi_date
+
+    # instance mass balance model
+    mb_mod = VAScalingMassBalance(gdir, bias=bias, filename=climate_filename,
+                                  input_filesuffix=climate_input_filesuffix,
+                                  ys=ys, ye=ye, **kwargs)
+
+    if ye is None:
+        # Decide from climate
+        ye = mb_mod.ye
+
+    # get needed values from glacier directory
+    min_hgt, max_hgt = get_min_max_elevation(gdir)
+    # find start area that results in RGI area
+    init_area_m2 = find_start_area(gdir, year_start=ys, adjust_term_elev=False,
+                                   instant_geometry_change=False)
+    if init_area_m2.success:
+        # use minimization result as initial area
+        init_area_m2 = float(init_area_m2.x)
+    else:
+        # throw error if minimization was unsuccessful
+        raise RuntimeError(f'No start area for {gdir.rgi_id} '
+                           f'in {ys} could be found')
+
+    # instance the model
+    model = VAScalingModel(year_0=ys, area_m2_0=init_area_m2,
+                           min_hgt=min_hgt, max_hgt=max_hgt,
+                           mb_model=mb_mod, glacier_type=gdir.glacier_type)
 
     # specify where to store model diagnostics
     diag_path = gdir.get_filepath('model_diagnostics',
@@ -2677,12 +2772,11 @@ class VAScalingModel(object):
 
         return rel_error
 
-    def start_area_minimization(self):
+    def start_area_minimization(start_year):
         """Find the start area which results in a best fitting area after
-        model integration. TODO:
+        model integration.
 
         """
-        raise NotImplementedError
 
 
 class FileModel(object):
