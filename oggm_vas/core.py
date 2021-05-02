@@ -53,6 +53,9 @@ def initialize(**kwargs):
     # call the oggm initialization
     cfg.initialize(**kwargs)
 
+    # add precipitation lapse rate of 4%/100m from Malles and Marzeion (2021)
+    cfg.PARAMS['prcp_default_gradient'] = 0.04e-2
+
     # area-volume scaling parameters for glaciers (cp. Marzeion et. al., 2012)
     # units: m^(3-2*gamma) and without unit, respectively
     cfg.PARAMS['vas_c_area_m2'] = 0.1912
@@ -156,7 +159,7 @@ def compute_solid_prcp(prcp, prcp_factor, ref_hgt, min_hgt, max_hgt,
         temperature lapse rate [degC per m of elevation change]
     prcp_grad : netCDF4 variable or float, optional
         precipitation lapse rate [percentage of precipitation per meters of
-            elevation change], Marzeion et al. (2012) used 3%/100m, default = 0
+            elevation change], default = 0
     prcp_anomaly : netCDF4 variable or float, optional
         monthly mean precipitation anomaly [kg/m2], default = 0
 
@@ -363,10 +366,9 @@ def get_yearly_mb_temp_prcp(gdir, time_range=None, year_range=None):
     prcp_fac = cfg.PARAMS['prcp_scaling_factor']
     default_grad = cfg.PARAMS['temp_default_gradient']
     g_minmax = cfg.PARAMS['temp_local_gradient_bounds']
-    # Marzeion et. al., 2012 used a precipitation lapse rate of 3%/100m.
-    # But the prcp gradient is omitted for now.
-    # prcp_grad = 3e-4
-    prcp_grad = 0
+    # Marzeion et. al. (2012) used a precipitation lapse rate of 3%/100m.
+    # Malles and Marzeion (2021) used a precipitation lapse rate of 4%/100m.
+    prcp_grad = cfg.PARAMS['prcp_default_gradient']
 
     # read the climate file
     igrad = None
@@ -1052,10 +1054,10 @@ class VAScalingMassBalance(MassBalanceModel):
 
         # set mass balance calibration parameters
         self.t_solid = cfg.PARAMS['temp_all_solid']
-        # self.t_liq = cfg.PARAMS['temp_all_liq']
         self.t_melt = cfg.PARAMS['temp_melt']
         prcp_fac = cfg.PARAMS['prcp_scaling_factor']
         default_grad = cfg.PARAMS['temp_default_gradient']
+        self.prcp_grad = cfg.PARAMS['prcp_default_gradient']
 
         # Check the climate related params to the GlacierDir to make sure
         if check_calib_params:
@@ -1158,7 +1160,8 @@ class VAScalingMassBalance(MassBalanceModel):
         # compute solid precipitation
         prcp_solid = compute_solid_prcp(iprcp, 1,
                                         self.ref_hgt, min_hgt, max_hgt,
-                                        temp_terminus, self.t_solid, igrad)
+                                        temp_terminus, self.t_solid, igrad,
+                                        self.prcp_grad)
 
         return temp_for_melt, prcp_solid
 
@@ -1240,7 +1243,8 @@ class VAScalingMassBalance(MassBalanceModel):
         # prcp factor is set to 1 since it the time series is already corrected
         prcp_solid = compute_solid_prcp(iprcp, 1,
                                         self.ref_hgt, min_hgt, max_hgt,
-                                        temp_terminus, self.t_solid, igrad)
+                                        temp_terminus, self.t_solid, igrad,
+                                        self.prcp_grad)
 
         return temp_for_melt, prcp_solid
 
