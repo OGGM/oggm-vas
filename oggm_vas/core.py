@@ -468,7 +468,8 @@ def _fallback_local_t_star(gdir):
     gdir.write_json(df, 'vascaling_mustar')
 
 
-@entity_task(log, writes=['vascaling_mustar'], fallback=_fallback_local_t_star)
+@entity_task(log, writes=['vascaling_mustar', 'climate_info'],
+             fallback=_fallback_local_t_star)
 def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
     """Compute the local t* and associated glacier-wide mu*.
 
@@ -494,8 +495,8 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
     """
 
     # specify relevant mass balance parameters
-    params = ['temp_default_gradient', 'temp_all_solid',  # 'temp_all_liq',
-              'temp_melt', 'prcp_scaling_factor']
+    params = ['temp_default_gradient', 'temp_all_solid',
+              'temp_melt', 'prcp_scaling_factor', 'prcp_default_gradient']
 
     if tstar is None or bias is None:
         # Do our own interpolation of t_start for given glacier
