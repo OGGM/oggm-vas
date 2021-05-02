@@ -918,7 +918,8 @@ def compile_fixed_geometry_mass_balance(gdirs, filesuffix='', path=True,
     return out
 
 
-def match_regional_geodetic_mb(gdirs, rgi_reg):
+def match_regional_geodetic_mb(gdirs, rgi_reg=None, dataset='hugonnet',
+                               period='2000-01-01_2020-01-01'):
     """ Re-implementation from the OGGM, see original docstring below:
 
     Regional shift of the mass-balance residual to match observations.
@@ -927,30 +928,37 @@ def match_regional_geodetic_mb(gdirs, rgi_reg):
 
     Parameters
     ----------
-    gdirs : the list of gdirs (ideally the entire region_
+    gdirs : the list of gdirs (ideally the entire region)
     rgi_reg : str
        the rgi region to match
+    dataset : str
+       'hugonnet', or 'zemp'
+    period : str
+       for 'hugonnet' only. One of
+       '2000-01-01_2010-01-01',
+       '2010-01-01_2020-01-01',
+       '2006-01-01_2019-01-01',
+       '2000-01-01_2020-01-01'.
+       For 'zemp', the period is always 2006-2016.
     """
 
     # Get the mass-balance VAS would give out of the box
     df = compile_fixed_geometry_mass_balance(gdirs, path=False)
     df = df.dropna(axis=0, how='all').dropna(axis=1, how='all')
-
-    # And also the Area and calving fluxes
+    # And also the area
     dfs = utils.compile_glacier_statistics(gdirs, path=False)
-    odf = pd.DataFrame(df.loc[2006:2018].mean(), columns=['SMB'])
-    odf['AREA'] = dfs.rgi_area_km2 * 1e6
-    # TODO: calving not considered yet
-    # Just take the calving rate and change its units
-    # Original units: km3 a-1, to change to mm a-1 (units of specific MB)
-    # rho = cfg.PARAMS['ice_density']
-    # if 'calving_flux' in dfs:
-    #     odf['CALVING'] = dfs['calving_flux'].fillna(0) * 1e9 * rho / odf['AREA']
-    # else:
-    #     odf['CALVING'] = 0
 
-    # We have to drop nans here, which occur when calving glaciers fail to run
-    # odf = odf.dropna()
+    # define start and end year depending on dataset
+    if dataset == 'hugonnet':
+        y0 = int(period.split('_')[0].split('-')[0])
+        y1 = int(period.split('_')[1].split('-')[0]) - 1
+    elif dataset == 'zemp':
+        y0, y1 = 2006, 2015
+
+    # subset for given period
+    odf = pd.DataFrame(df.loc[y0:y1].mean(), columns=['SMB'])
+    # add area to dataframe
+    odf['AREA'] = dfs.rgi_area_km2 * 1e6
 
     # Compare area with total RGI area
     rdf = 'rgi62_areas.csv'
@@ -962,10 +970,18 @@ def match_regional_geodetic_mb(gdirs, rgi_reg):
 
     # Total MB OGGM
     out_smb = np.average(odf['SMB'], weights=odf['AREA'])  # for logging
-    # TODO: calving not considered
-    # out_cal = np.average(odf['CALVING'], weights=odf['AREA'])  # for logging
-    # smb_oggm = np.average(odf['SMB'] - odf['CALVING'], weights=odf['AREA'])
     smb_oggm = out_smb
+
+    # Total MB Reference
+    if dataset == 'hugonnet':
+        df = 'table_hugonnet_regions_10yr_20yr_ar6period.csv'
+        df = pd.read_csv(utils.get_demo_file(df))
+        df = df.loc[df.period == period].set_index('reg')
+        smb_ref = df.loc[int(rgi_reg), 'dmdtda']
+    elif dataset == 'zemp':
+        df = 'zemp_ref_2006_2016.csv'
+        df = pd.read_csv(utils.get_demo_file(df), index_col=0)
+        smb_ref = df.loc[int(rgi_reg), 'SMB'] * 1000
 
     # Total MB Reference
     df = 'table_hugonnet_regions_10yr_20yr_ar6period.csv'
@@ -980,7 +996,6 @@ def match_regional_geodetic_mb(gdirs, rgi_reg):
     log.workflow('Shifting regional MB bias by {}'.format(residual))
     log.workflow('Observations give {}'.format(smb_ref))
     log.workflow('OGGM SMB gives {}'.format(out_smb))
-    # log.workflow('OGGM frontal ablation gives {}'.format(out_cal))
     for gdir in gdirs:
         try:
             df = gdir.read_json('vascaling_mustar')
