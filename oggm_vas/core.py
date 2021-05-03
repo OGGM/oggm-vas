@@ -686,7 +686,7 @@ def t_star_from_refmb(gdir, mbdf=None):
             'avg_mb_per_mu': mb_per_mu, 'avg_ref_mb': ref_mb}
 
 
-@global_task
+@global_task(log)
 def compute_ref_t_stars(gdirs):
     """Detects the best t* for the reference glaciers and writes them to disk
 
