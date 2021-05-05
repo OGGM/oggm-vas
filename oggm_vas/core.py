@@ -2129,6 +2129,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
                          bias=None, temperature_bias=None,
                          climate_filename='climate_historical',
                          climate_input_filesuffix='', output_filesuffix='',
+                         init_model_filesuffix=None, init_model_yr=None,
                          init_area_m2=None, **kwargs):
     """
     Runs the constant mass balance model for a given number of years.
@@ -2163,13 +2164,35 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
     output_filesuffix : str, optional
         this add a suffix to the output file (useful to avoid overwriting
         previous experiments)
+    init_model_filesuffix : str
+        if you want to start from a previous model run state. Can be combined
+        with `init_model_yr`, overwrites `init_area_m2`
+    init_model_yr : int
+        the year of the initial run you want to start from. The default
+        is to take the last year of the simulation.
     init_area_m2: float, optional
-        glacier area with which the model is initialized, default is RGI value
+        glacier area with which the model is initialized, default is RGI value,
+        gets overwriten by init_model_filesuffix
 
     Returns
     -------
     :py:class:`oggm.core.vascaling.VAScalingModel`
     """
+
+    # Initialize model from previous run if filesuffix is specified
+    if init_model_filesuffix is not None:
+        # read the given model run and create a dummy model
+        fp = gdir.get_filepath('model_diagnostics',
+                               filesuffix=init_model_filesuffix)
+        fmod = FileModel(fp)
+
+        if init_model_yr is None:
+            # start with last year of initialization run if not specified
+            init_model_yr = fmod.last_yr
+        fmod.run_until(init_model_yr)
+        ys = init_model_yr
+    else:
+        fmod = None
 
     # instance mass balance model
     mb_mod = ConstantVASMassBalance(gdir, mu_star=None, bias=bias, y0=y0,
@@ -2188,6 +2211,9 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
     model = VAScalingModel(year_0=0, area_m2_0=init_area_m2,
                            min_hgt=min_hgt, max_hgt=max_hgt,
                            mb_model=mb_mod)
+    if fmod:
+        # set initial state accordingly
+        model.reset_from_filemodel(fmod)
     # specify path where to store model diagnostics
     diag_path = gdir.get_filepath('model_diagnostics',
                                   filesuffix=output_filesuffix,
