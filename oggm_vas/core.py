@@ -1088,7 +1088,7 @@ class VAScalingMassBalance(MassBalanceModel):
 
         # set public attributes
         self.temp_bias = 0.
-        self.prcp_bias = 1.
+        self.prcp_fac = 1.
         self.repeat = repeat
         self.hemisphere = gdir.hemisphere
 
@@ -1164,7 +1164,7 @@ class VAScalingMassBalance(MassBalanceModel):
 
         # Read timeseries
         itemp = self.temp[pok] + self.temp_bias
-        iprcp = self.prcp[pok] * self.prcp_bias
+        iprcp = self.prcp[pok] * self.prcp_fac
         igrad = self.grad[pok]
 
         # compute terminus temperature
@@ -1246,7 +1246,7 @@ class VAScalingMassBalance(MassBalanceModel):
 
         # Read timeseries
         itemp = self.temp[pok] + self.temp_bias
-        iprcp = self.prcp[pok] * self.prcp_bias
+        iprcp = self.prcp[pok] * self.prcp_fac
         igrad = self.grad[pok]
 
         # compute terminus temperature
@@ -1694,17 +1694,17 @@ class RandomVASMassBalance(MassBalanceModel):
         self.mbmod.temp_bias = value
 
     @property
-    def prcp_bias(self):
+    def prcp_fac(self):
         """Precipitation factor to apply to the original series."""
-        return self.mbmod.prcp_bias
+        return self.mbmod.prcp_fac
 
-    @prcp_bias.setter
-    def prcp_bias(self, value):
+    @prcp_fac.setter
+    def prcp_fac(self, value):
         """Precipitation factor to apply to the original series."""
         for attr_name in ['_lazy_interp_yr', '_lazy_interp_m']:
             if hasattr(self, attr_name):
                 delattr(self, attr_name)
-        self.mbmod.prcp_bias = value
+        self.mbmod.prcp_fac = value
 
     @property
     def bias(self):
@@ -1977,17 +1977,17 @@ class ConstantVASMassBalance(MassBalanceModel):
         self.mbmod.temp_bias = value
 
     @property
-    def prcp_bias(self):
+    def prcp_fac(self):
         """Precipitation factor to apply to the original series."""
-        return self.mbmod.prcp_bias
+        return self.mbmod.prcp_fac
 
-    @prcp_bias.setter
-    def prcp_bias(self, value):
+    @prcp_fac.setter
+    def prcp_fac(self, value):
         """Precipitation factor to apply to the original series."""
         for attr_name in ['_lazy_interp_yr', '_lazy_interp_m']:
             if hasattr(self, attr_name):
                 delattr(self, attr_name)
-        self.mbmod.prcp_bias = value
+        self.mbmod.prcp_fac = value
 
     @property
     def bias(self):
