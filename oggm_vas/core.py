@@ -2213,7 +2213,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
                            mb_model=mb_mod)
     if fmod:
         # set initial state accordingly
-        model.reset_from_filemodel(fmod)
+        model.reset_from_filemodel(fmod, y0=0)
     # specify path where to store model diagnostics
     diag_path = gdir.get_filepath('model_diagnostics',
                                   filesuffix=output_filesuffix,
@@ -2441,7 +2441,7 @@ class VAScalingModel(object):
         self.tau_a = 1
         self.tau_l = 1
 
-    def reset_from_filemodel(self, fmod):
+    def reset_from_filemodel(self, fmod, y0=None):
         """
 
         Parameters
@@ -2468,7 +2468,7 @@ class VAScalingModel(object):
         self.tau_l = fmod.tau_l
 
         # reset initial values
-        self.reset_year_0(y0=self.year)
+        self.reset_year_0(y0=self.year if y0 is None else y0)
 
     def step(self, time_scale_factor=1, instant_geometry_change=False):
         """Advance model glacier by one year. This includes the following:
