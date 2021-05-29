@@ -2468,7 +2468,9 @@ class VAScalingModel(object):
         self.tau_l = fmod.tau_l
 
         # reset initial values
-        self.reset_year_0(y0=self.year if y0 is None else y0)
+        # self.reset_year_0(y0=self.year if y0 is None else y0)
+        if y0 is not None:
+            self.year = y0
 
     def step(self, time_scale_factor=1, instant_geometry_change=False):
         """Advance model glacier by one year. This includes the following:
