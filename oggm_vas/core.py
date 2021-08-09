@@ -764,8 +764,12 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
 
     # get reference area and year from RGI
     a_rgi = gdir.rgi_area_m2
-    rgi_df = utils.get_rgi_glacier_entities([gdir.rgi_id])
-    y_rgi = int(rgi_df.BgnDate.values[0][:4])
+    try:
+        y_rgi = gdir.rgi_date.year
+    except AttributeError:
+        y_rgi = gdir.rgi_date
+    # rgi_df = utils.get_rgi_glacier_entities([gdir.rgi_id])
+    # y_rgi = int(rgi_df.BgnDate.values[0][:4])
     y_rgi += 1
     # get min and max glacier surface elevation
     h_min, h_max = get_min_max_elevation(gdir)
@@ -773,7 +777,7 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
     # set up the glacier model with the reference values (from RGI)
     model_ref = VAScalingModel(year_0=y_rgi, area_m2_0=a_rgi,
                                min_hgt=h_min, max_hgt=h_max,
-                               mb_model=mbmod)
+                               mb_model=mbmod, glacier_type=gdir.glacier_type)
 
     def _to_minimize(area_m2_start, ref, _year_start=year_start,
                      _adjust_term_elev=adjust_term_elev):
@@ -804,7 +808,7 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
                                    min_hgt=ref.min_hgt_0,
                                    max_hgt=ref.max_hgt,
                                    mb_model=ref.mb_model,
-                                   glacier_type=gdir.glacier_type)
+                                   glacier_type=ref.glacier_type)
         # scale to desired starting size
         model_tmp.create_start_glacier(area_m2_start, year_start=_year_start,
                                        adjust_term_elev=_adjust_term_elev)
@@ -1469,8 +1473,8 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
                                   ys=ys, ye=ye, **kwargs)
 
     if ye is None:
-        # Decide from climate
-        ye = mb_mod.ye
+        # Decide from climate (we can run the last year with data as well)
+        ye = mb_mod.ye + 1
 
     # get needed values from glacier directory
     min_hgt, max_hgt = get_min_max_elevation(gdir)
@@ -1517,7 +1521,8 @@ def run_historic_from_climate_data(gdir, ys, ye=None,
         the glacier directory to process
     ys : int
         start year of the model run (default: from the glacier geometry
-        date if init_model_filesuffix is None, else init_model_yr)
+        date if init_model_filesuffix is None, else init_model_yr), get
+        overriden by the glacier geometry date if it is before the start year
     ye : int
         end year of the model run (default: last year of the provided
         climate file)
