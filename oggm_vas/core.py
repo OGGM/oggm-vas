@@ -36,7 +36,7 @@ from oggm.core import climate
 from oggm.core.massbalance import MassBalanceModel
 
 # Module logger
-# log = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 def initialize(**kwargs):
