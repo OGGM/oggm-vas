@@ -1074,3 +1074,94 @@ class TestVAScalingModel(unittest.TestCase):
     def test_match_regional_geodetic_mb(self):
         """TODO: write tests and docstring"""
         pass
+
+    def test_geodetic_mb_calibration(self):
+        """ TODO:
+
+        Returns
+        -------
+
+        """
+
+        # create glacier entity and perform needed prepro tasks
+        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
+        entity = gpd.read_file(hef_file).iloc[0]
+        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+        gis.define_glacier_region(gdir)
+        gis.simple_glacier_masks(gdir)
+        climate.process_custom_climate_data(gdir)
+        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+        gis.define_glacier_region(gdir)
+        gis.simple_glacier_masks(gdir)
+        climate.process_custom_climate_data(gdir)
+
+        # perform the "old" mass balance calibration via local_t_star
+        mbdf = gdir.get_ref_mb_data()
+        res = vascaling.t_star_from_refmb(gdir, mbdf=mbdf['ANNUAL_BALANCE'])
+        t_star, bias = res['t_star'], res['bias']
+        vascaling.local_t_star(gdir, tstar=t_star, bias=bias)
+
+        # define a mass balance model with the obtained parameters
+        mb_old = vascaling.VAScalingMassBalance(gdir)
+
+        # set upper limit for mu star
+        cfg.PARAMS['max_mu_star'] = 600
+        # calibrate mass balance parameters from geodetic observations
+        ref_mb = mbdf.ANNUAL_BALANCE.mean()
+        vascaling.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
+                                                       ref_period='1953-01-01_2004-01-01')
+        # define a mass balance model with the obtained parameters
+        mb_new = massbalance.PastMassBalance(gdir)
+
+        # stop test here, since the assertion statements are not updated yet
+        # TODO: continue here
+        raise NotImplementedError
+
+        h, w = gdir.get_inversion_flowline_hw()
+        mbdf['old_mb'] = mb_old.get_specific_mb(h, w, year=mbdf.index)
+        mbdf['new_mb'] = mb_new.get_specific_mb(h, w, year=mbdf.index)
+
+        # Check that results are all the same
+        np.testing.assert_allclose(ref_mb, mbdf['old_mb'].mean())
+        np.testing.assert_allclose(ref_mb, mbdf['new_mb'].mean())
+        np.testing.assert_allclose(1, mbdf.corr()['new_mb']['old_mb'], atol=0.01)
+
+        # Check that model parameters
+        np.testing.assert_allclose(mb_old.mu_star, mb_new.mu_star, atol=2)
+        np.testing.assert_allclose(mb_new.bias, 0)
+
+        # OK now check what happens with unrealistic climate input
+        # Very positive
+        ref_mb = 2000
+        climate.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
+                                                     min_mu_star=5,
+                                                     max_mu_star=500,
+                                                     ref_period='1953-01-01_2004-01-01')
+        mb_new = massbalance.PastMassBalance(gdir)
+        mbdf['new_mb'] = mb_new.get_specific_mb(h, w, year=mbdf.index)
+        np.testing.assert_allclose(ref_mb, mbdf['new_mb'].mean())
+        fpath = gdir.get_filepath('climate_historical')
+        with utils.ncDataset(fpath, 'r') as nc:
+            assert nc.ref_hgt < nc.uncorrected_ref_hgt
+            assert (gdir.get_diagnostics()['ref_hgt_calib_diff'] ==
+                    nc.ref_hgt - nc.uncorrected_ref_hgt)
+        assert 5 < mb_new.mu_star < 500
+
+        # Very negative
+        ref_mb = -10000
+        climate.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
+                                                     min_mu_star=5,
+                                                     max_mu_star=500,
+                                                     ref_period='1953-01-01_2004-01-01')
+        mb_new = massbalance.PastMassBalance(gdir)
+        mbdf['new_mb'] = mb_new.get_specific_mb(h, w, year=mbdf.index)
+        np.testing.assert_allclose(ref_mb, mbdf['new_mb'].mean())
+        fpath = gdir.get_filepath('climate_historical')
+        with utils.ncDataset(fpath, 'r') as nc:
+            assert nc.ref_hgt > nc.uncorrected_ref_hgt
+            assert (gdir.get_diagnostics()['ref_hgt_calib_diff'] ==
+                    nc.ref_hgt - nc.uncorrected_ref_hgt)
+        assert 5 < mb_new.mu_star < 500
+
+        # Check that inversion works
+        climate.apparent_mb_from_any_mb(gdir, mb_years=[1953, 2003])
