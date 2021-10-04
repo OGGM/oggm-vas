@@ -1090,10 +1090,6 @@ class TestVAScalingModel(unittest.TestCase):
         gis.define_glacier_region(gdir)
         gis.simple_glacier_masks(gdir)
         climate.process_custom_climate_data(gdir)
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        gis.define_glacier_region(gdir)
-        gis.simple_glacier_masks(gdir)
-        climate.process_custom_climate_data(gdir)
 
         # perform the "old" mass balance calibration via local_t_star
         mbdf = gdir.get_ref_mb_data()

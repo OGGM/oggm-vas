@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import netCDF4
-from scipy.optimize import minimize_scalar
+from scipy.optimize import minimize_scalar, brentq
 from sklearn.linear_model import LinearRegression
 
 # import OGGM modules
@@ -37,6 +37,14 @@ from oggm.core.massbalance import MassBalanceModel
 
 # Module logger
 log = logging.getLogger(__name__)
+
+# Tolerance for the Brent's optimization method
+_brentq_xtol = 2e-12
+
+# Climate parameters relevant for the mass balance calibration
+MB_PARAMS = ['temp_default_gradient', 'temp_all_solid', 'temp_all_liq',
+             'temp_melt', 'prcp_scaling_factor', 'prcp_default_gradient',
+             'climate_qc_months']
 
 
 def initialize(**kwargs):
@@ -495,8 +503,8 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
     """
 
     # specify relevant mass balance parameters
-    params = ['temp_default_gradient', 'temp_all_solid',
-              'temp_melt', 'prcp_scaling_factor', 'prcp_default_gradient']
+    # params = ['temp_default_gradient', 'temp_all_solid',
+    #           'temp_melt', 'prcp_scaling_factor', 'prcp_default_gradient']
 
     if tstar is None or bias is None:
         # Do our own interpolation of t_start for given glacier
@@ -516,19 +524,17 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                 v = gdir.rgi_version[0]
                 # baseline climate
                 str_s = 'cru4' if 'CRU' in source else 'histalp'
-                # str_s = 'histalp'
                 # read calibration params reference table
                 fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v,
                                                                         str_s)
                 fp = get_ref_tstars_filepath(fn)
                 calib_params = json.load(open(fp))
-                # check if calibration params match
-                for k in params:
-                    if cfg.PARAMS[k] != calib_params[k]:
-                        msg = ('The reference t* you are trying to use was '
-                               'calibrated with different MB parameters. You '
-                               'might have to run the calibration manually.')
+                for k, v in calib_params.items():
+                    if cfg.PARAMS[k] != v:
+                        msg = ('The reference t* list you are trying to use '
+                               'was calibrated with different MB parameters.')
                         raise MassBalanceCalibrationError(msg)
+
                 # read reference table
                 fn = 'vas_ref_tstars_rgi{}_{}.csv'.format(v, str_s)
                 fp = get_ref_tstars_filepath(fn)
@@ -558,7 +564,7 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
     # Add the climate related params to the GlacierDir to make sure
     # other tools cannot fool around without re-calibration
     out = gdir.get_climate_info()
-    out['mb_calib_params'] = {k: cfg.PARAMS[k] for k in params}
+    out['mb_calib_params'] = {k: cfg.PARAMS[k] for k in MB_PARAMS}
     gdir.write_json(out, 'climate_info')
 
     # We compute the overall mu* here but this is mostly for testing
@@ -590,6 +596,173 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
     df['t_star'] = int(tstar)
     df['bias'] = bias
     df['mu_star'] = mustar
+    gdir.write_json(df, 'vascaling_mustar')
+
+
+@entity_task(log, writes=['vascaling_mustar', 'climate_info'],
+             fallback=_fallback_local_t_star)
+def mu_star_calibration_from_geodetic_mb(gdir,
+                                         ref_mb=None,
+                                         ref_period='',
+                                         step_height_for_corr=25,
+                                         max_height_change_for_corr=3000,
+                                         min_mu_star=None,
+                                         max_mu_star=None):
+    """Compute the flowlines' mu* from the reference geodetic MB data.
+
+    This is similar to mu_star_calibration but using the reference geodetic
+    MB data instead, and this does NOT compute the apparent mass-balance at
+    the same time - users need to run apparent_mb_from_any_mb separately.
+    Currently only works for single flowlines.
+
+    Parameters
+    ----------
+    gdir : :py:class:`oggm.GlacierDirectory`
+        the glacier directory to process
+    ref_mb : float
+        the reference mass-balance to match (units: kg m-2 yr-1)
+    ref_period : str, default: PARAMS['geodetic_mb_period']
+        one of '2000-01-01_2010-01-01', '2010-01-01_2020-01-01',
+        '2000-01-01_2020-01-01'. If `ref_mb` is set, this should still match
+        the same format but can be any date.
+    min_mu_star: bool, optional
+        defaults to cfg.PARAMS['min_mu_star']
+    max_mu_star: bool, optional
+        defaults to cfg.PARAMS['max_mu_star']
+    """
+
+    # use default mu* constraints if none are given
+    if min_mu_star is None:
+        min_mu_star = cfg.PARAMS['min_mu_star']
+    if max_mu_star is None:
+        max_mu_star = cfg.PARAMS['max_mu_star']
+
+    # Throw an error if the upper mu* limit is too high
+    if max_mu_star > 1000:
+        raise InvalidParamsError('You seem to have set a very high '
+                                 'max_mu_star for this run. This is not '
+                                 'how this task is supposed to work, and '
+                                 'we recommend a value lower than 1000 '
+                                 '(or even 600).')
+
+    # use default reference period if none is given
+    if not ref_period:
+        ref_period = cfg.PARAMS['geodetic_mb_period']
+
+    # get start and end year from reference period parameter
+    y0, y1 = ref_period.split('_')
+    y0 = int(y0.split('-')[0])
+    y1 = int(y1.split('-')[0])
+    # define year range
+    yr_range = [y0, y1 - 1]
+
+    # get yearly climate information
+    _, temp, prcp = get_yearly_mb_temp_prcp(gdir, year_range=yr_range)
+
+    if ref_mb is None:
+        # get the reference data if not given
+        ref_mb = utils.get_geodetic_mb_dataframe().loc[gdir.rgi_id]
+        ref_mb = float(ref_mb.loc[ref_mb['period'] == ref_period]['dmdtda'])
+        # convert dmdtda from meters water-equivalent per year into kg m-2 yr-1
+        ref_mb *= 1000
+
+    def _mu_star_per_minimization(x, cmb, temp, prcp):
+        return (prcp - x * temp) - cmb
+
+    try:
+        mu_star = brentq(_mu_star_per_minimization,
+                         min_mu_star, max_mu_star,
+                         args=(ref_mb, temp, prcp),
+                         xtol=_brentq_xtol)
+    except ValueError:
+        # This happens when out of bounds
+
+        # Funny enough, this bias correction is arbitrary.
+        # Here I'm trying something arbitrary as well.
+        # Let's try to find a range of corrections that would lead to an
+        # allowed mu* and pick one
+
+        # Here we ignore the previous QC correction - if any -
+        # to ensure that results are the same even after previous correction
+        fpath = gdir.get_filepath('climate_historical')
+        with utils.ncDataset(fpath, 'a') as nc:
+            start = getattr(nc, 'uncorrected_ref_hgt', nc.ref_hgt)
+            nc.uncorrected_ref_hgt = start
+            nc.ref_hgt = start
+
+        # Read timeseries again after reset
+        _, temp, prcp = get_yearly_mb_temp_prcp(gdir, year_range=yr_range)
+
+        # Check in which direction we should correct the temp
+        _lim0 = _mu_star_per_minimization(min_mu_star, ref_mb, temp, prcp)
+        if _lim0 < 0:
+            # The mass-balances are too positive to be matched - we need to
+            # cool down the climate data
+            step = -step_height_for_corr
+            end = -max_height_change_for_corr
+        else:
+            # The other way around
+            step = step_height_for_corr
+            end = max_height_change_for_corr
+
+        steps = np.arange(start, start + end, step, dtype=np.int64)
+        mu_candidates = steps * np.NaN
+        for i, h in enumerate(steps):
+            with utils.ncDataset(fpath, 'a') as nc:
+                nc.ref_hgt = h
+
+            # Read timeseries
+            _, temp, prcp = get_yearly_mb_temp_prcp(gdir, year_range=yr_range)
+
+            try:
+                mu_star = brentq(_mu_star_per_minimization,
+                                 min_mu_star, max_mu_star,
+                                 args=(ref_mb, temp, prcp),
+                                 xtol=_brentq_xtol)
+            except ValueError:
+                mu_star = np.NaN
+
+            # Done - store for later
+            mu_candidates[i] = mu_star
+
+        sel_steps = steps[np.isfinite(mu_candidates)]
+        sel_mus = mu_candidates[np.isfinite(mu_candidates)]
+        if len(sel_mus) == 0:
+            # Yeah nothing we can do here
+            raise MassBalanceCalibrationError('We could not find a way to '
+                                              'correct the climate data and '
+                                              'fit within the prescribed '
+                                              'bounds for mu*.')
+
+        # Now according to all the corrections we have a series of candidates
+        # Her we just pick the first, but to be fair it is arbitrary
+        # We could also pick one randomly...
+        mu_star = sel_mus[0]
+        # Final correction of the data
+        with utils.ncDataset(fpath, 'a') as nc:
+            nc.ref_hgt = sel_steps[0]
+        gdir.add_to_diagnostics('ref_hgt_calib_diff', sel_steps[0] - start)
+
+    if not np.isfinite(mu_star):
+        raise MassBalanceCalibrationError('{} '.format(gdir.rgi_id) +
+                                          'has a non finite mu.')
+
+    # Add the climate related params to the GlacierDir to make sure
+    # other tools cannot fool around without re-calibration
+    out = gdir.get_climate_info()
+    out['mb_calib_params'] = {k: cfg.PARAMS[k] for k in MB_PARAMS}
+    gdir.write_json(out, 'climate_info')
+
+    # Store diagnostics
+    df = dict()
+    df['rgi_id'] = gdir.rgi_id
+    df['t_star'] = np.nan
+    df['bias'] = 0
+    df['mu_star_per_flowline'] = [mu_star]
+    df['mu_star_glacierwide'] = mu_star
+    df['mu_star_flowline_avg'] = mu_star
+    df['mu_star_allsame'] = True
+    # Write
     gdir.write_json(df, 'vascaling_mustar')
 
 
@@ -731,6 +904,13 @@ def compute_ref_t_stars(gdirs):
     df['n_mb_years'] = df['n_mb_years'].astype(int)
     file = os.path.join(cfg.PATHS['working_dir'], 'ref_tstars.csv')
     df.sort_index().to_csv(file)
+
+    # We store the associated params to make sure
+    # other tools cannot fool around without re-calibration
+    params_file = os.path.join(cfg.PATHS['working_dir'],
+                               'vas_ref_tstars_params.json')
+    with open(params_file, 'w') as fp:
+        json.dump({k: cfg.PARAMS[k] for k in MB_PARAMS}, fp)
 
 
 @entity_task(log)
