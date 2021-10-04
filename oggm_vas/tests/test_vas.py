@@ -1107,10 +1107,9 @@ class TestVAScalingModel(unittest.TestCase):
         vascaling.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
                                                        ref_period='1953-01-01_2004-01-01')
         # define a mass balance model with the obtained parameters
-        mb_new = massbalance.PastMassBalance(gdir)
+        mb_new = vascaling.VAScalingMassBalance(gdir)
 
-        # stop test here, since the assertion statements are not updated yet
-        # TODO: continue here
+        ### continue here
         raise NotImplementedError
 
         h, w = gdir.get_inversion_flowline_hw()

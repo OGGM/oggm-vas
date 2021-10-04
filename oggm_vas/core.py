@@ -30,7 +30,8 @@ from oggm import __version__
 
 from oggm import utils, entity_task, global_task, workflow
 from oggm.utils import floatyear_to_date, ncDataset
-from oggm.exceptions import InvalidParamsError, MassBalanceCalibrationError
+from oggm.exceptions import InvalidParamsError, MassBalanceCalibrationError, \
+    InvalidWorkflowError
 
 from oggm.core import climate
 from oggm.core.massbalance import MassBalanceModel
@@ -502,10 +503,6 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
 
     """
 
-    # specify relevant mass balance parameters
-    # params = ['temp_default_gradient', 'temp_all_solid',
-    #           'temp_melt', 'prcp_scaling_factor', 'prcp_default_gradient']
-
     if tstar is None or bias is None:
         # Do our own interpolation of t_start for given glacier
         if ref_df is None:
@@ -666,8 +663,8 @@ def mu_star_calibration_from_geodetic_mb(gdir,
         # convert dmdtda from meters water-equivalent per year into kg m-2 yr-1
         ref_mb *= 1000
 
-    def _mu_star_per_minimization(x, cmb, temp, prcp):
-        return (prcp - x * temp) - cmb
+    def _mu_star_per_minimization(x, ref_mb, temp, prcp):
+        return np.mean((prcp - x * temp) - ref_mb)
 
     try:
         mu_star = brentq(_mu_star_per_minimization,
@@ -756,12 +753,10 @@ def mu_star_calibration_from_geodetic_mb(gdir,
     # Store diagnostics
     df = dict()
     df['rgi_id'] = gdir.rgi_id
-    df['t_star'] = np.nan
+    t_star = gdir.read_json('vascaling_mustar')['t_star']
+    df['t_star'] = t_star
     df['bias'] = 0
-    df['mu_star_per_flowline'] = [mu_star]
-    df['mu_star_glacierwide'] = mu_star
-    df['mu_star_flowline_avg'] = mu_star
-    df['mu_star_allsame'] = True
+    df['mu_star'] = mu_star
     # Write
     gdir.write_json(df, 'vascaling_mustar')
 
@@ -1309,6 +1304,11 @@ class VAScalingMassBalance(MassBalanceModel):
         # compute climatological precipitation around t*
         # needed later to estimate the volume/length scaling parameter
         t_star = gdir.read_json('vascaling_mustar')['t_star']
+        if not np.isfinite(t_star):
+            raise InvalidWorkflowError('A t* is needed to compute the '
+                                       'climatological precipitaion amount: '
+                                       'run local_t_star (before '
+                                       'mu_star_calibration_from_geodetic_mb).')
         mu_hp = int(cfg.PARAMS['mu_star_halfperiod'])
         yr = [t_star - mu_hp, t_star + mu_hp]
         _, _, prcp_clim = get_yearly_mb_temp_prcp(gdir, year_range=yr)
