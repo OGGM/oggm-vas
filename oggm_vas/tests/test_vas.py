@@ -1109,17 +1109,17 @@ class TestVAScalingModel(unittest.TestCase):
         # define a mass balance model with the obtained parameters
         mb_new = vascaling.VAScalingMassBalance(gdir)
 
-        ### continue here
-        raise NotImplementedError
-
-        h, w = gdir.get_inversion_flowline_hw()
-        mbdf['old_mb'] = mb_old.get_specific_mb(h, w, year=mbdf.index)
-        mbdf['new_mb'] = mb_new.get_specific_mb(h, w, year=mbdf.index)
+        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
+        mbdf['old_mb'] = mb_old.get_specific_mb(min_hgt, max_hgt,
+                                                year=mbdf.index)
+        mbdf['new_mb'] = mb_new.get_specific_mb(min_hgt, max_hgt,
+                                                year=mbdf.index)
 
         # Check that results are all the same
         np.testing.assert_allclose(ref_mb, mbdf['old_mb'].mean())
         np.testing.assert_allclose(ref_mb, mbdf['new_mb'].mean())
-        np.testing.assert_allclose(1, mbdf.corr()['new_mb']['old_mb'], atol=0.01)
+        np.testing.assert_allclose(1, mbdf.corr()['new_mb']['old_mb'],
+                                   atol=0.01)
 
         # Check that model parameters
         np.testing.assert_allclose(mb_old.mu_star, mb_new.mu_star, atol=2)
@@ -1128,12 +1128,13 @@ class TestVAScalingModel(unittest.TestCase):
         # OK now check what happens with unrealistic climate input
         # Very positive
         ref_mb = 2000
-        climate.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
-                                                     min_mu_star=5,
-                                                     max_mu_star=500,
-                                                     ref_period='1953-01-01_2004-01-01')
-        mb_new = massbalance.PastMassBalance(gdir)
-        mbdf['new_mb'] = mb_new.get_specific_mb(h, w, year=mbdf.index)
+        vascaling.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
+                                                       min_mu_star=5,
+                                                       max_mu_star=500,
+                                                       ref_period='1953-01-01_2004-01-01')
+        mb_new = vascaling.VAScalingMassBalance(gdir)
+        mbdf['new_mb'] = mb_new.get_specific_mb(min_hgt, max_hgt,
+                                                year=mbdf.index)
         np.testing.assert_allclose(ref_mb, mbdf['new_mb'].mean())
         fpath = gdir.get_filepath('climate_historical')
         with utils.ncDataset(fpath, 'r') as nc:
@@ -1143,13 +1144,14 @@ class TestVAScalingModel(unittest.TestCase):
         assert 5 < mb_new.mu_star < 500
 
         # Very negative
-        ref_mb = -10000
-        climate.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
-                                                     min_mu_star=5,
-                                                     max_mu_star=500,
-                                                     ref_period='1953-01-01_2004-01-01')
-        mb_new = massbalance.PastMassBalance(gdir)
-        mbdf['new_mb'] = mb_new.get_specific_mb(h, w, year=mbdf.index)
+        ref_mb = -15000
+        vascaling.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
+                                                       min_mu_star=5,
+                                                       max_mu_star=500,
+                                                       ref_period='1953-01-01_2004-01-01')
+        mb_new = vascaling.VAScalingMassBalance(gdir)
+        mbdf['new_mb'] = mb_new.get_specific_mb(min_hgt, max_hgt,
+                                                year=mbdf.index)
         np.testing.assert_allclose(ref_mb, mbdf['new_mb'].mean())
         fpath = gdir.get_filepath('climate_historical')
         with utils.ncDataset(fpath, 'r') as nc:
@@ -1157,6 +1159,3 @@ class TestVAScalingModel(unittest.TestCase):
             assert (gdir.get_diagnostics()['ref_hgt_calib_diff'] ==
                     nc.ref_hgt - nc.uncorrected_ref_hgt)
         assert 5 < mb_new.mu_star < 500
-
-        # Check that inversion works
-        climate.apparent_mb_from_any_mb(gdir, mb_years=[1953, 2003])
