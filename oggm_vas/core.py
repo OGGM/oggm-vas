@@ -526,8 +526,8 @@ def local_t_star(gdir, ref_df=None, tstar=None, bias=None):
                                                                         str_s)
                 fp = get_ref_tstars_filepath(fn)
                 calib_params = json.load(open(fp))
-                for k, v in calib_params.items():
-                    if cfg.PARAMS[k] != v:
+                for key, value in calib_params.items():
+                    if cfg.PARAMS[key] != value:
                         msg = ('The reference t* list you are trying to use '
                                'was calibrated with different MB parameters.')
                         raise MassBalanceCalibrationError(msg)
@@ -605,12 +605,7 @@ def mu_star_calibration_from_geodetic_mb(gdir,
                                          max_height_change_for_corr=3000,
                                          min_mu_star=None,
                                          max_mu_star=None):
-    """Compute the flowlines' mu* from the reference geodetic MB data.
-
-    This is similar to mu_star_calibration but using the reference geodetic
-    MB data instead, and this does NOT compute the apparent mass-balance at
-    the same time - users need to run apparent_mb_from_any_mb separately.
-    Currently only works for single flowlines.
+    """TODO:
 
     Parameters
     ----------
@@ -622,9 +617,13 @@ def mu_star_calibration_from_geodetic_mb(gdir,
         one of '2000-01-01_2010-01-01', '2010-01-01_2020-01-01',
         '2000-01-01_2020-01-01'. If `ref_mb` is set, this should still match
         the same format but can be any date.
-    min_mu_star: bool, optional
+    step_height_for_corr : float, optional, default=25
+        TODO:
+    max_height_change_for_corr : float, optional, default=3000
+        TODO:
+    min_mu_star: float, optional
         defaults to cfg.PARAMS['min_mu_star']
-    max_mu_star: bool, optional
+    max_mu_star: float, optional
         defaults to cfg.PARAMS['max_mu_star']
     """
 
