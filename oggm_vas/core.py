@@ -45,7 +45,7 @@ _brentq_xtol = 2e-12
 # Climate parameters relevant for the mass balance calibration
 MB_PARAMS = ['temp_default_gradient', 'temp_all_solid', 'temp_all_liq',
              'temp_melt', 'prcp_scaling_factor', 'prcp_default_gradient',
-             'climate_qc_months']
+             'climate_qc_months', 'hydro_month_nh', 'hydro_month_sh']
 
 
 def initialize(**kwargs):
@@ -604,7 +604,10 @@ def mu_star_calibration_from_geodetic_mb(gdir,
                                          step_height_for_corr=25,
                                          max_height_change_for_corr=3000,
                                          min_mu_star=None,
-                                         max_mu_star=None):
+                                         max_mu_star=None,
+                                         ignore_hydro_months=False,
+                                         tstar=None,
+                                         ref_df=None):
     """TODO:
 
     Parameters
@@ -625,13 +628,80 @@ def mu_star_calibration_from_geodetic_mb(gdir,
         defaults to cfg.PARAMS['min_mu_star']
     max_mu_star: float, optional
         defaults to cfg.PARAMS['max_mu_star']
+    ignore_hydro_months: bool, optional
+        do not raise and error if we are not working on calendar years.
     """
+
+    # The t* is needed later to compute the climatological preicipation amount.
+    # Hence, the same tstar/ref_df interpolation as for local_t_star is
+    # performed hereafter.
+    if tstar is None:
+        # Do our own interpolation of t_start for given glacier
+        if ref_df is None:
+            if not cfg.PARAMS['run_mb_calibration']:
+                # Make some checks and use the default one
+                climate_info = gdir.get_climate_info()
+                source = climate_info['baseline_climate_source']
+                ok_source = ['CRU TS4.01', 'CRU TS3.23', 'HISTALP']
+                # ok_source = ['HISTALP']
+                if not np.any(s in source.upper() for s in ok_source):
+                    msg = ('If you are using a custom climate file you should '
+                           'run your own MB calibration.')
+                    raise MassBalanceCalibrationError(msg)
+
+                # major RGI version relevant
+                v = gdir.rgi_version[0]
+                # baseline climate
+                str_s = 'cru4' if 'CRU' in source else 'histalp'
+                # read calibration params reference table
+                fn = 'vas_ref_tstars_rgi{}_{}_calib_params.json'.format(v,
+                                                                        str_s)
+                fp = get_ref_tstars_filepath(fn)
+                calib_params = json.load(open(fp))
+                for key, value in calib_params.items():
+                    if cfg.PARAMS[key] != value:
+                        msg = ('The reference t* list you are trying to use '
+                               'was calibrated with different MB parameters.')
+                        raise MassBalanceCalibrationError(msg)
+
+                # read reference table
+                fn = 'vas_ref_tstars_rgi{}_{}.csv'.format(v, str_s)
+                fp = get_ref_tstars_filepath(fn)
+                ref_df = pd.read_csv(fp)
+            else:
+                # Use the the local calibration
+                fp = os.path.join(cfg.PATHS['working_dir'], 'ref_tstars.csv')
+                ref_df = pd.read_csv(fp)
+
+        # Compute the distance to each glacier
+        distances = utils.haversine(gdir.cenlon, gdir.cenlat,
+                                    ref_df.lon, ref_df.lat)
+
+        # Take the 10 closest
+        aso = np.argsort(distances)[0:9]
+        amin = ref_df.iloc[aso]
+        distances = distances[aso] ** 2
+
+        # If really close no need to divide, else weighted average
+        if distances.iloc[0] <= 0.1:
+            tstar = amin.tstar.iloc[0]
+        else:
+            tstar = int(np.average(amin.tstar, weights=1. / distances))
 
     # use default mu* constraints if none are given
     if min_mu_star is None:
         min_mu_star = cfg.PARAMS['min_mu_star']
     if max_mu_star is None:
         max_mu_star = cfg.PARAMS['max_mu_star']
+
+    sm = cfg.PARAMS['hydro_month_' + gdir.hemisphere]
+    if sm != 1 and not ignore_hydro_months:
+        raise InvalidParamsError('mu_star_calibration_from_geodetic_mb makes '
+                                 'more sense when applied on calendar years '
+                                 "(PARAMS['hydro_month_nh']=1 and "
+                                 "`PARAMS['hydro_month_sh']=1). If you want "
+                                 "to ignore this error, set "
+                                 "ignore_hydro_months to True")
 
     # Throw an error if the upper mu* limit is too high
     if max_mu_star > 1000:
@@ -752,7 +822,6 @@ def mu_star_calibration_from_geodetic_mb(gdir,
     # Store diagnostics
     df = dict()
     df['rgi_id'] = gdir.rgi_id
-    t_star = gdir.read_json('vascaling_mustar')['t_star']
     df['t_star'] = t_star
     df['bias'] = 0
     df['mu_star'] = mu_star
@@ -1303,11 +1372,6 @@ class VAScalingMassBalance(MassBalanceModel):
         # compute climatological precipitation around t*
         # needed later to estimate the volume/length scaling parameter
         t_star = gdir.read_json('vascaling_mustar')['t_star']
-        if not np.isfinite(t_star):
-            raise InvalidWorkflowError('A t* is needed to compute the '
-                                       'climatological precipitaion amount: '
-                                       'run local_t_star (before '
-                                       'mu_star_calibration_from_geodetic_mb).')
         mu_hp = int(cfg.PARAMS['mu_star_halfperiod'])
         yr = [t_star - mu_hp, t_star + mu_hp]
         _, _, prcp_clim = get_yearly_mb_temp_prcp(gdir, year_range=yr)
