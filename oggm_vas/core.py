@@ -822,7 +822,7 @@ def mu_star_calibration_from_geodetic_mb(gdir,
     # Store diagnostics
     df = dict()
     df['rgi_id'] = gdir.rgi_id
-    df['t_star'] = t_star
+    df['t_star'] = int(tstar)
     df['bias'] = 0
     df['mu_star'] = mu_star
     # Write
