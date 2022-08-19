@@ -1853,7 +1853,7 @@ class RandomVASMassBalance(MassBalanceModel):
     def __init__(self, gdir, mu_star=None, bias=None,
                  y0=None, halfsize=15, seed=None,
                  filename='climate_historical', input_filesuffix='',
-                 all_years=False, unique_samples=False):
+                 all_years=False, unique_samples=False, prescribe_years=None):
         """Initialize.
 
         Parameters
@@ -1888,6 +1888,11 @@ class RandomVASMassBalance(MassBalanceModel):
             once per random climate period-length
             if false, every model year will be chosen from the random climate
             period with the same probability
+        prescribe_years : pandas Series
+            instead of random samples, take a series of (i, y) pairs where
+            (i) is the simulation year index and (y) is the year to pick in the
+            original timeseries. Overrides `y0`, `halfsize`, `all_years`,
+            `unique_samples` and `seed`.
         """
 
         super(RandomVASMassBalance, self).__init__()
@@ -1897,30 +1902,42 @@ class RandomVASMassBalance(MassBalanceModel):
                                           filename=filename,
                                           input_filesuffix=input_filesuffix)
 
+        # Climate period
+        self.prescribe_years = prescribe_years
+
+        if self.prescribe_years is None:
+            # define random state
+            self.rng = np.random.RandomState(seed)
+
+            # define years of climate period
+            if all_years:
+                # use full climate period
+                self.years = self.mbmod.years
+            else:
+                if y0 is None:
+                    # choose t* as center of climate period
+                    df = gdir.read_json('vascaling_mustar')
+                    self.y0 = df['t_star']
+                else:
+                    # set y0 as attribute
+                    self.y0 = y0
+                # use 31-year period around given year `y0`
+                self.years = np.arange(self.y0 - halfsize,
+                                       self.y0 + halfsize + 1)
+        else:
+            # use prescibed years
+            self.rng = None
+            self.years = self.prescribe_years.index
+
         # get mb model parameters
         self.prcp_clim = self.mbmod.prcp_clim
 
-        # define years of climate period
-        if all_years:
-            # use full climate period
-            self.years = self.mbmod.years
-        else:
-            if y0 is None:
-                # choose t* as center of climate period
-                df = gdir.read_json('vascaling_mustar')
-                self.y0 = df['t_star']
-            else:
-                # set y0 as attribute
-                self.y0 = y0
-            # use 31-year period around given year `y0`
-            self.years = np.arange(self.y0 - halfsize, self.y0 + halfsize + 1)
         # define year range and number of years
         self.yr_range = (self.years[0], self.years[-1] + 1)
         self.ny = len(self.years)
         self.hemisphere = gdir.hemisphere
 
-        # define random state
-        self.rng = np.random.RandomState(seed)
+        # internal counter storing current year
         self._state_yr = dict()
 
         # whether or not to sample with or without replacement
@@ -1968,22 +1985,26 @@ class RandomVASMassBalance(MassBalanceModel):
         """For a given year, get the random year associated to it."""
         year = int(year)
         if year not in self._state_yr:
-            if self.unique_samples:
-                # --- Sampling without replacement ---
-                if self.sampling_years.size == 0:
-                    # refill sample pool when all years were picked once
-                    self.sampling_years = self.years
-                # choose one year which was not used in the current period
-                _sample = self.rng.choice(self.sampling_years)
-                # write chosen year to dictionary
-                self._state_yr[year] = _sample
-                # update sample pool: remove the chosen year from it
-                self.sampling_years = np.delete(
-                    self.sampling_years,
-                    np.where(self.sampling_years == _sample))
+            if self.prescribe_years is not None:
+                # --- use prescribed years ---
+                self._state_yr[year] = self.prescribe_years.loc[year]
             else:
-                # --- Sampling with replacement ---
-                self._state_yr[year] = self.rng.randint(*self.yr_range)
+                if self.unique_samples:
+                    # --- Sampling without replacement ---
+                    if self.sampling_years.size == 0:
+                        # refill sample pool when all years were picked once
+                        self.sampling_years = self.years
+                    # choose one year which was not used in the current period
+                    _sample = self.rng.choice(self.sampling_years)
+                    # write chosen year to dictionary
+                    self._state_yr[year] = _sample
+                    # update sample pool: remove the chosen year from it
+                    self.sampling_years = np.delete(
+                        self.sampling_years,
+                        np.where(self.sampling_years == _sample))
+                else:
+                    # --- Sampling with replacement ---
+                    self._state_yr[year] = self.rng.randint(*self.yr_range)
         return self._state_yr[year]
 
     def get_monthly_mb(self, min_hgt, max_hgt, year=None):
@@ -2496,6 +2517,39 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
     model.run_until_and_store(year_end=nyears, diag_path=diag_path, **kwargs)
 
     return model
+
+
+@entity_task(log)
+def run_isimip_climate(gdir, period='',
+                       nyears=None,
+                       climate_filename='gcm_data',
+                       climate_input_filesuffix='',
+                       output_filesuffix='',
+                       **kwargs):
+    """Runs the random isimip mass-balance model for a given number of years.
+
+    Parameters
+    ----------
+    """
+
+    isimip_url = 'https://cluster.klima.uni-bremen.de/~lschuster/isimip3b/'
+
+    shuffle_file = 'https://raw.githubusercontent.com/GlacierMIP/GlacierMIP3/main/shuffling/shuffled_years_GlacierMIP3.csv'
+
+    df = pd.read_csv(utils.file_downloader(shuffle_file), index_col=0)
+
+    mb = RandomVASMassBalance(gdir, prescribe_years=df[period],
+                              filename=climate_filename,
+                              input_filesuffix=climate_input_filesuffix)
+
+    if nyears is not None:
+        ye = df.index[nyears]
+    else:
+        ye = df.index[-1] + 1
+
+    return vas_model_run(gdir, output_filesuffix=output_filesuffix,
+                         mb_model=mb, ys=df.index[0], ye=ye,
+                         **kwargs)
 
 
 class VAScalingModel(object):
@@ -3099,6 +3153,77 @@ class VAScalingModel(object):
         model integration.
 
         """
+
+
+@entity_task(log)
+def vas_model_run(gdir, output_filesuffix=None, mb_model=None,
+                  ys=None, ye=None, init_model_filesuffix=None,
+                  init_model_yr=None, init_area_m2=None):
+    """Runs a VAS model simulation and returns the model
+
+    Parameters
+    ----------
+    gdir : :py:class:`oggm.GlacierDirectory`
+        the glacier directory to process
+    output_filesuffix : str
+        this add a suffix to the output file (useful to avoid overwriting
+        previous experiments)
+    mb_model : :py:class:`core.MassBalanceModel`
+        a MassBalanceModel instance
+    ys : int
+        start year of the model run (default: from the config file)
+    ye : int
+        end year of the model run (default: from the config file)
+    zero_initial_glacier : bool
+        if true, the ice thickness is set to zero before the simulation
+    init_model_filesuffix : str
+        if you want to start from a previous model run state. Can be
+        combined with `init_model_yr`
+    init_model_yr : int
+        the year of the initial run you want to start from. The default
+        is to take the last year of the simulation.
+    init_area_m2: float, optional
+        glacier area with which the model is initialized, default is RGI value,
+        gets overwriten by init_model_filesuffix
+
+     """
+
+    # Initialize model from previous run if filesuffix is specified
+    if init_model_filesuffix is not None:
+        # read the given model run and create a dummy model
+        fp = gdir.get_filepath('model_diagnostics',
+                               filesuffix=init_model_filesuffix)
+        fmod = FileModel(fp)
+
+        if init_model_yr is None:
+            # start with last year of initialization run if not specified
+            init_model_yr = fmod.last_yr
+        fmod.run_until(init_model_yr)
+        ys = init_model_yr
+    else:
+        fmod = None
+
+    # instance the model
+    min_hgt, max_hgt = get_min_max_elevation(gdir)
+    if init_area_m2 is None:
+        init_area_m2 = gdir.rgi_area_m2
+
+    # instance model
+    model = VAScalingModel(year_0=ys, area_m2_0=init_area_m2, min_hgt=min_hgt,
+                           max_hgt=max_hgt, mb_model=mb_model,
+                           glacier_type=gdir.glacier_type)
+
+
+    diag_path = gdir.get_filepath('model_diagnostics',
+                                  filesuffix=output_filesuffix,
+                                  delete=True)
+
+    with np.warnings.catch_warnings():
+        # For operational runs we ignore the warnings
+        np.warnings.filterwarnings('ignore', category=RuntimeWarning)
+        model.run_until_and_store(ye, diag_path=diag_path)
+
+    return model
 
 
 class FileModel(object):
