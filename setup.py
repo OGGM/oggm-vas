@@ -120,6 +120,7 @@ def check_dependencies(package_names):
 
 
 req_packages = ['oggm',
+                'sklearn',
                 ]
 check_dependencies(req_packages)
 
@@ -165,7 +166,7 @@ setup(
         'oggm_vas': ['data/*'],
     },
     # Old
-    # data_files=[],
+    data_files=[],
     # Executable scripts
-    # entry_points={},
+    entry_points={},
 )
