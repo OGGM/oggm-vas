@@ -165,7 +165,7 @@ setup(
         'oggm_vas': ['data/*'],
     },
     # Old
-    data_files=[],
+    # data_files=[],
     # Executable scripts
-    entry_points={},
+    # entry_points={},
 )
