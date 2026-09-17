@@ -28,9 +28,10 @@ CLASSIFIERS = [
         'Intended Audience :: Science/Research',
         'License :: OSI Approved :: BSD License',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6',
-        'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
     ]
 
 DESCRIPTION = 'Open Global Glacier Model - VAS package'
@@ -121,6 +122,10 @@ def check_dependencies(package_names):
 
 req_packages = ['oggm',
                 'sklearn',
+                'numpy',
+                'pandas',
+                'xarray',
+                'scipy',
                 ]
 check_dependencies(req_packages)
 
@@ -154,17 +159,13 @@ setup(
     # What does your project relate to?
     keywords=['geosciences', 'glaciers', 'climate'],
     # We are a python 3 only shop
-    python_requires='>=3.5',
+    python_requires='>=3.10',
     # Find packages automatically
     packages=find_packages(exclude=['docs']),
     # Decided not to let pip install the dependencies, this is too brutal
     install_requires=[],
     # additional groups of dependencies here (e.g. development dependencies).
     extras_require={},
-    # data files that need to be installed
-    package_data={
-        'oggm_vas': ['data/*'],
-    },
     # Old
     data_files=[],
     # Executable scripts
