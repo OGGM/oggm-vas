@@ -8,34 +8,32 @@ Author: Moritz Oberrauch
 """
 # Built ins
 import logging
-import datetime
 from time import gmtime, strftime
 
 # External libs
 import numpy as np
 import pandas as pd
 import xarray as xr
-import netCDF4
 from scipy.optimize import minimize_scalar
 from sklearn.linear_model import LinearRegression
 
 # import OGGM modules
 import oggm
 import oggm.cfg as cfg
-from oggm.cfg import SEC_IN_YEAR, SEC_IN_MONTH
-
 from oggm import __version__
-
-from oggm import utils, entity_task, global_task, workflow
+from oggm import utils, entity_task, workflow
 from oggm.utils import floatyear_to_date, date_to_floatyear, lazy_property
-from oggm.exceptions import InvalidParamsError, MassBalanceCalibrationError, \
-    InvalidWorkflowError
+from oggm.exceptions import InvalidParamsError, InvalidWorkflowError
 
 from oggm.core import massbalance
 from oggm.core.massbalance import MassBalanceModel, MonthlyTIModel
 
 # Module logger
 log = logging.getLogger(__name__)
+
+# Diagnostic variables that `oggm.utils.compile_run_output` accepts. The VAS
+# specific ones (spec_mb, tau_l, ...) are written to `vas_diagnostics`.
+OGGM_DIAG_VARS = ['volume_m3', 'area_m2', 'length_m']
 
 
 def initialize(**kwargs):
@@ -82,20 +80,20 @@ def compute_temp_terminus(temp, temp_grad, ref_hgt,
 
     Parameters
     ----------
-    temp : netCDF4 variable
+    temp : np.ndarray
         monthly mean climatological temperature (degC)
-    temp_grad : netCDF4 variable or float
+    temp_grad : np.ndarray or float
         temperature lapse rate [degC per m of elevation change]
     ref_hgt : float
         reference elevation for climatological temperature [m asl.]
     terminus_hgt : float
         elevation of the glacier terminus (m asl.)
-    temp_anomaly : netCDF4 variable or float, optional
+    temp_anomaly : np.ndarray or float, optional
         monthly mean temperature anomaly, default 0
 
     Returns
     -------
-    netCDF4 variable
+    np.ndarray
         monthly mean temperature at the glacier terminus [degC]
 
     """
@@ -116,23 +114,23 @@ def compute_solid_prcp(prcp, min_hgt, max_hgt, temp_terminus,
 
     Parameters
     ----------
-    prcp : netCDF4 variable
+    prcp : np.ndarray
         monthly mean climatological precipitation [kg/m2], already scaled
         by the precipitation factor
     min_hgt : float
         minimum glacier elevation [m asl.]
     max_hgt : float
         maximum glacier elevation [m asl.]
-    temp_terminus : netCDF4 variable
+    temp_terminus : np.ndarray
         monthly mean temperature at the glacier terminus [degC]
     temp_all_solid : float
         temperature threshold below which all precipitation is solid [degC]
-    temp_grad : netCDF4 variable or float
+    temp_grad : np.ndarray or float
         temperature lapse rate [degC per m of elevation change]
 
     Returns
     -------
-    netCDF4 variable
+    np.ndarray
         monthly mean solid precipitation [kg/m2]
 
     """
@@ -486,7 +484,7 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
     closest to measured RGI surface in 2003).
 
     All necessary prepro task (gis, centerline, climate) must be executed
-    beforehand, as well as the local_t_star() task.
+    beforehand, as well as the mass balance calibration.
 
     Parameters
     ----------
@@ -513,9 +511,14 @@ def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
         y_rgi = gdir.rgi_date.year
     except AttributeError:
         y_rgi = gdir.rgi_date
-    # rgi_df = utils.get_rgi_glacier_entities([gdir.rgi_id])
-    # y_rgi = int(rgi_df.BgnDate.values[0][:4])
     y_rgi += 1
+    # reaching year y_rgi needs a mass balance for y_rgi - 1, so stop at the
+    # end of the climate record if the inventory date is younger than it
+    if y_rgi > mbmod.ye + 1:
+        log.warning('(%s) the RGI date (%d) is not covered by the climate '
+                    'data, comparing at %d instead.',
+                    gdir.rgi_id, y_rgi - 1, mbmod.ye)
+        y_rgi = mbmod.ye + 1
     # get min and max glacier surface elevation
     h_min, h_max = get_min_max_elevation(gdir)
 
@@ -649,7 +652,7 @@ def compile_fixed_geometry_mass_balance(gdirs, filesuffix='', path=True,
     # combine into one DataFrame and handle missing data
     for idx, s in enumerate(out_df):
         if s is None:
-            out_df[idx] = pd.Series(np.NaN)
+            out_df[idx] = pd.Series(np.nan)
     out = pd.concat(out_df, axis=1, keys=[gd.rgi_id for gd in gdirs])
     out = out.dropna(axis=0, how='all')
 
@@ -671,7 +674,7 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
                           climate_filename='climate_historical',
                           climate_input_filesuffix='', output_filesuffix='',
                           init_model_filesuffix=None, init_model_yr=None,
-                          init_area_m2=None, bias=None, **kwargs):
+                          init_area_m2=None, bias=0, **kwargs):
     """ Runs a glacier with climate input from e.g. CRU or a GCM.
 
     This will initialize a :py:class:`oggm-vas.core.VAScalingMassBalance` and
@@ -723,7 +726,7 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     # Initialize model from previous run if filesuffix is specified
     if init_model_filesuffix is not None:
         # read the given model run and create a dummy model
-        fp = gdir.get_filepath('model_diagnostics',
+        fp = gdir.get_filepath('vas_diagnostics',
                                filesuffix=init_model_filesuffix)
         fmod = FileModel(fp)
 
@@ -741,9 +744,8 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
             ys = gdir.rgi_date.year
         except AttributeError:
             ys = gdir.rgi_date
-        # The RGI timestamp is in calendar date - we convert to hydro date,
-        # i.e. 2003 becomes 2004 (so that we don't count the MB year 2003
-        # in the simulation)
+        # Start the year after the RGI date, so that we don't count the
+        # MB year of the inventory date in the simulation (as OGGM does)
         ys += 1
 
     # Final crop
@@ -778,8 +780,12 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     diag_path = gdir.get_filepath('model_diagnostics',
                                   filesuffix=output_filesuffix,
                                   delete=True)
+    vas_diag_path = gdir.get_filepath('vas_diagnostics',
+                                      filesuffix=output_filesuffix,
+                                      delete=True)
     # run
-    model.run_until_and_store(year_end=ye, diag_path=diag_path)
+    model.run_until_and_store(year_end=ye, diag_path=diag_path,
+                              vas_diag_path=vas_diag_path)
 
     return model
 
@@ -789,7 +795,7 @@ def run_historic_from_climate_data(gdir, ys, ye=None,
                                    climate_filename='climate_historical',
                                    climate_input_filesuffix='',
                                    output_filesuffix='',
-                                   bias=None, **kwargs):
+                                   bias=0, **kwargs):
     """ Runs a glacier with climate input from the given start year ys. Thereby
     the glacier model is initialized so that the glacier area equals the RGI
     area at the RGI date. If the RGI date is before the start year the model
@@ -831,9 +837,8 @@ def run_historic_from_climate_data(gdir, ys, ye=None,
         rgi_date = gdir.rgi_date.year
     except AttributeError:
         rgi_date = gdir.rgi_date
-    # The RGI timestamp is in calendar date - we convert to hydro date,
-    # i.e. 2003 becomes 2004 (so that we don't count the MB year 2003
-    # in the simulation)
+    # Start the year after the RGI date, so that we don't count the
+    # MB year of the inventory date in the simulation (as OGGM does)
     rgi_date += 1
 
     # start from RGI date if it is before the desired start year
@@ -871,8 +876,12 @@ def run_historic_from_climate_data(gdir, ys, ye=None,
     diag_path = gdir.get_filepath('model_diagnostics',
                                   filesuffix=output_filesuffix,
                                   delete=True)
+    vas_diag_path = gdir.get_filepath('vas_diagnostics',
+                                      filesuffix=output_filesuffix,
+                                      delete=True)
     # run
-    model.run_until_and_store(year_end=ye, diag_path=diag_path)
+    model.run_until_and_store(year_end=ye, diag_path=diag_path,
+                              vas_diag_path=vas_diag_path)
 
     return model
 
@@ -1067,7 +1076,7 @@ class RandomVASMassBalance(_VASMassBalanceWrapper):
 
 @entity_task(log)
 def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
-                       bias=None, seed=None, temperature_bias=None,
+                       bias=0, seed=None, temperature_bias=None,
                        climate_filename='climate_historical',
                        climate_input_filesuffix='', output_filesuffix='',
                        init_model_filesuffix=None, init_model_yr=None,
@@ -1131,7 +1140,7 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
     # Initialize model from previous run if filesuffix is specified
     if init_model_filesuffix is not None:
         # read the given model run and create a dummy model
-        fp = gdir.get_filepath('model_diagnostics',
+        fp = gdir.get_filepath('vas_diagnostics',
                                filesuffix=init_model_filesuffix)
         fmod = FileModel(fp)
 
@@ -1167,8 +1176,12 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
     diag_path = gdir.get_filepath('model_diagnostics',
                                   filesuffix=output_filesuffix,
                                   delete=True)
+    vas_diag_path = gdir.get_filepath('vas_diagnostics',
+                                      filesuffix=output_filesuffix,
+                                      delete=True)
     # run model
-    model.run_until_and_store(year_end=nyears, diag_path=diag_path, **kwargs)
+    model.run_until_and_store(year_end=nyears, diag_path=diag_path,
+                              vas_diag_path=vas_diag_path, **kwargs)
 
     return model
 
@@ -1237,7 +1250,7 @@ class ConstantVASMassBalance(_VASMassBalanceWrapper):
 
 @entity_task(log)
 def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
-                         bias=None, temperature_bias=None,
+                         bias=0, temperature_bias=None,
                          climate_filename='climate_historical',
                          climate_input_filesuffix='', output_filesuffix='',
                          init_model_filesuffix=None, init_model_yr=None,
@@ -1293,7 +1306,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
     # Initialize model from previous run if filesuffix is specified
     if init_model_filesuffix is not None:
         # read the given model run and create a dummy model
-        fp = gdir.get_filepath('model_diagnostics',
+        fp = gdir.get_filepath('vas_diagnostics',
                                filesuffix=init_model_filesuffix)
         fmod = FileModel(fp)
 
@@ -1306,7 +1319,7 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
         fmod = None
 
     # instance mass balance model
-    mb_mod = ConstantVASMassBalance(gdir, mu_star=None, bias=bias, y0=y0,
+    mb_mod = ConstantVASMassBalance(gdir, bias=bias, y0=y0,
                                     halfsize=halfsize,
                                     filename=climate_filename,
                                     input_filesuffix=climate_input_filesuffix)
@@ -1329,8 +1342,12 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
     diag_path = gdir.get_filepath('model_diagnostics',
                                   filesuffix=output_filesuffix,
                                   delete=True)
+    vas_diag_path = gdir.get_filepath('vas_diagnostics',
+                                      filesuffix=output_filesuffix,
+                                      delete=True)
     # run model
-    model.run_until_and_store(year_end=nyears, diag_path=diag_path, **kwargs)
+    model.run_until_and_store(year_end=nyears, diag_path=diag_path,
+                              vas_diag_path=vas_diag_path, **kwargs)
 
     return model
 
@@ -1380,8 +1397,10 @@ class VAScalingModel(object):
             specify whether to use 'Glacier' or 'Ice cap' scaling parameters
         """
 
-        # get constants from cfg.PARAMS
-        self.rho = cfg.PARAMS['ice_density']
+        # ice density: keep it consistent with the mass balance model
+        self.rho = getattr(mb_model, 'ice_density', None)
+        if self.rho is None:
+            self.rho = cfg.PARAMS['ice_density']
 
         # gets scaling parameters depending on the glacier type
         if glacier_type == 'Glacier':
@@ -1399,7 +1418,8 @@ class VAScalingModel(object):
             self.ql = cfg.PARAMS['vas_q_icecap_length']
             self.gamma = cfg.PARAMS['vas_gamma_icecap_area']
         else:
-            ValueError("Glacier type can only be 'Glacier' or 'Ice cap'.")
+            raise InvalidParamsError("Glacier type can only be 'Glacier' "
+                                     "or 'Ice cap'.")
 
         self.glacier_type = glacier_type
 
@@ -1423,9 +1443,15 @@ class VAScalingModel(object):
 
         # define mass balance model and spec mb
         self.mb_model = mb_model
-        self.spec_mb = self.mb_model.get_specific_mb(self.min_hgt,
-                                                     self.max_hgt,
-                                                     self.year)
+        self.mb_model.max_hgt = self.max_hgt
+        # year_0 can legitimately sit outside of the climate record (e.g.
+        # `find_start_area` compares at the RGI date), and the initial
+        # specific mass balance is only a diagnostic - the first step
+        # recomputes it anyway.
+        if self.mb_model.is_year_valid(self.year):
+            self._get_specific_mb()
+        else:
+            self.spec_mb = np.nan
         # create geometry change parameters
         self.dL = 0
         self.dA = 0
@@ -1436,11 +1462,15 @@ class VAScalingModel(object):
         self.tau_l = 1
 
     def _get_specific_mb(self):
-        """Invoke `get_specific_mb()` from mass balance model for current year
-        and glacier terminus elevation."""
-        self.spec_mb = self.mb_model.get_specific_mb(self.min_hgt,
-                                                     self.max_hgt,
-                                                     self.year)
+        """Invoke `get_specific_mb()` from the mass balance model for the
+        current year and glacier terminus elevation.
+
+        The VAS mass balance models carry the glacier geometry themselves, so
+        the current terminus elevation is handed over before asking for the
+        mass balance.
+        """
+        self.mb_model.min_hgt = self.min_hgt
+        self.spec_mb = self.mb_model.get_specific_mb(year=self.year)
 
     def _compute_time_scales(self, factor=1, instant_geometry_change=False):
         """Compute the time scales for glacier length `tau_l`
@@ -1666,6 +1696,7 @@ class VAScalingModel(object):
                 self.volume_m3, self.min_hgt, self.spec_mb)
 
     def run_until_and_store(self, year_end, diag_path=None,
+                            vas_diag_path=None,
                             reset=False, time_scale_factor=1,
                             instant_geometry_change=False):
         """Runs the model till the specified year. Returns all relevant
@@ -1677,11 +1708,13 @@ class VAScalingModel(object):
         ----------
         year_end : float
             end of modeling period
-        run_path : str, optional
-            path and filename where to store the model run dataset,
-            default = None
         diag_path : str, optional
-            path where to store glacier diagnostics, default = None
+            path where to store the OGGM compatible glacier diagnostics
+            (volume, area and length), default = None
+        vas_diag_path : str, optional
+            path where to store the full VAS diagnostics, which additionally
+            hold the specific mass balance, the terminus and maximum surface
+            elevation and the response time scales, default = None
         reset : bool, optional
             If `True`, the model will start from `year_0`, otherwise from its
             current position in time (default).
@@ -1712,32 +1745,10 @@ class VAScalingModel(object):
                                      'mass-balance model with an unambiguous '
                                      'hemisphere.')
 
-        # define different temporal indices
-        yearly_time = np.arange(np.floor(self.year), np.floor(year_end) + 1)
-
-        # TODO: include `store_monthly_step` in parameter list or remove IF:
-        store_monthly_step = False
-        if store_monthly_step:
-            # get monthly time index
-            monthly_time = utils.monthly_timeseries(self.year, year_end)
-        else:
-            # monthly time
-            monthly_time = yearly_time.copy()
-        # get years and month for hydrological year and calender year
-        yrs, months = utils.floatyear_to_date(monthly_time)
-        sm = cfg.PARAMS['hydro_month_' + self.mb_model.hemisphere]
-        cyrs, cmonths = utils.hydrodate_to_calendardate(yrs, months,
-                                                        start_month=sm)
-
-        # get number of temporal indices
-        ny = len(yearly_time)
-        nm = len(monthly_time)
-        # deal with one dimensional temporal indices
-        if ny == 1:
-            yrs = [yrs]
-            cyrs = [cyrs]
-            months = [months]
-            cmonths = [cmonths]
+        # the model is annual, and OGGM is calendar year based
+        years = np.arange(int(np.floor(self.year)),
+                          int(np.floor(year_end)) + 1)
+        ny = len(years)
 
         # initialize diagnostics output file
         diag_ds = xr.Dataset()
@@ -1749,54 +1760,55 @@ class VAScalingModel(object):
         diag_ds.attrs['creation_date'] = strftime("%Y-%m-%d %H:%M:%S",
                                                   gmtime())
         diag_ds.attrs['hemisphere'] = self.mb_model.hemisphere
+        diag_ds.attrs['glacier_type'] = self.glacier_type
 
-        # Coordinates
-        diag_ds.coords['time'] = ('time', monthly_time)
-        diag_ds.coords['hydro_year'] = ('time', yrs)
-        diag_ds.coords['hydro_month'] = ('time', months)
-        diag_ds.coords['calendar_year'] = ('time', cyrs)
-        diag_ds.coords['calendar_month'] = ('time', cmonths)
+        # Coordinates - same convention as OGGM, so that the usual tools
+        # (`utils.compile_run_output`) can read our output
+        yrs, months = utils.floatyear_to_date(years.astype(np.float64))
+        sm = cfg.PARAMS['hydro_month_' + self.mb_model.hemisphere]
+        hyrs, hmonths = utils.calendardate_to_hydrodate(yrs, months,
+                                                        start_month=sm)
+
+        diag_ds.coords['time'] = ('time', years.astype(np.float64))
+        diag_ds.coords['calendar_year'] = ('time', yrs)
+        diag_ds.coords['calendar_month'] = ('time', months)
+        diag_ds.coords['hydro_year'] = ('time', hyrs)
+        diag_ds.coords['hydro_month'] = ('time', hmonths)
         # add description as attribute to coordinates
-        diag_ds['time'].attrs['description'] = 'Floating hydrological year'
-        diag_ds['hydro_year'].attrs['description'] = 'Hydrological year'
-        diag_ds['hydro_month'].attrs['description'] = 'Hydrological month'
+        diag_ds['time'].attrs['description'] = 'Floating year'
         diag_ds['calendar_year'].attrs['description'] = 'Calendar year'
         diag_ds['calendar_month'].attrs['description'] = 'Calendar month'
+        diag_ds['hydro_year'].attrs['description'] = 'Hydrological year'
+        diag_ds['hydro_month'].attrs['description'] = 'Hydrological month'
 
         # create empty variables and attributes
-        diag_ds['volume_m3'] = ('time', np.zeros(nm) * np.NaN)
+        diag_ds['volume_m3'] = ('time', np.zeros(ny) * np.nan)
         diag_ds['volume_m3'].attrs['description'] = 'Total glacier volume'
         diag_ds['volume_m3'].attrs['unit'] = 'm 3'
-        diag_ds['area_m2'] = ('time', np.zeros(nm) * np.NaN)
+        diag_ds['area_m2'] = ('time', np.zeros(ny) * np.nan)
         diag_ds['area_m2'].attrs['description'] = 'Total glacier area'
         diag_ds['area_m2'].attrs['unit'] = 'm 2'
-        diag_ds['length_m'] = ('time', np.zeros(nm) * np.NaN)
+        diag_ds['length_m'] = ('time', np.zeros(ny) * np.nan)
         diag_ds['length_m'].attrs['description'] = 'Glacier length'
-        diag_ds['length_m'].attrs['unit'] = 'm 3'
-        diag_ds['ela_m'] = ('time', np.zeros(nm) * np.NaN)
-        diag_ds['ela_m'].attrs['description'] = ('Annual Equilibrium Line '
-                                                 'Altitude  (ELA)')
-        diag_ds['ela_m'].attrs['unit'] = 'm a.s.l'
-        diag_ds['spec_mb'] = ('time', np.zeros(nm) * np.NaN)
+        diag_ds['length_m'].attrs['unit'] = 'm'
+        diag_ds['spec_mb'] = ('time', np.zeros(ny) * np.nan)
         diag_ds['spec_mb'].attrs['description'] = 'Specific mass balance'
         diag_ds['spec_mb'].attrs['unit'] = 'mm w.e. yr-1'
-        diag_ds['min_hgt'] = ('time', np.zeros(nm) * np.NaN)
+        diag_ds['min_hgt'] = ('time', np.zeros(ny) * np.nan)
         diag_ds['min_hgt'].attrs['description'] = 'Terminus elevation'
         diag_ds['min_hgt'].attrs['unit'] = 'm asl.'
-        diag_ds['max_hgt'] = ('time', np.zeros(nm) * np.NaN)
+        diag_ds['max_hgt'] = ('time', np.zeros(ny) * np.nan)
         diag_ds['max_hgt'].attrs['description'] = 'Maximum surface elevation'
         diag_ds['max_hgt'].attrs['unit'] = 'm asl.'
-        diag_ds['tau_l'] = ('time', np.zeros(nm) * np.NaN)
+        diag_ds['tau_l'] = ('time', np.zeros(ny) * np.nan)
         diag_ds['tau_l'].attrs['description'] = 'Length change response time'
         diag_ds['tau_l'].attrs['unit'] = 'years'
-        diag_ds['tau_a'] = ('time', np.zeros(nm) * np.NaN)
+        diag_ds['tau_a'] = ('time', np.zeros(ny) * np.nan)
         diag_ds['tau_a'].attrs['description'] = 'Area change response time'
         diag_ds['tau_a'].attrs['unit'] = 'years'
-        # TODO: handel tidewater glaciers
-        # TODO: write glacier type and scaling parameters?!
 
         # run the model
-        for i, yr in enumerate(monthly_time):
+        for i, yr in enumerate(years):
             self.run_until(yr, time_scale_factor=time_scale_factor,
                            instant_geometry_change=instant_geometry_change)
             # store diagnostics
@@ -1809,9 +1821,19 @@ class VAScalingModel(object):
             diag_ds['tau_l'].data[i] = self.tau_l
             diag_ds['tau_a'].data[i] = self.tau_a
 
+        if vas_diag_path is not None:
+            # the full VAS output, including the response times
+            diag_ds.to_netcdf(vas_diag_path)
+
         if diag_path is not None:
-            # write to file
-            diag_ds.to_netcdf(diag_path)
+            # `utils.compile_run_output` refuses variables it does not know
+            # about, so the OGGM-compatible file only holds the geometry
+            oggm_ds = diag_ds[OGGM_DIAG_VARS]
+            # it also reads these ice dynamics parameters unconditionally.
+            # They have no meaning for a volume/area scaling model.
+            for attr in ['water_level', 'glen_a', 'fs']:
+                oggm_ds.attrs[attr] = np.nan
+            oggm_ds.to_netcdf(diag_path)
 
         return diag_ds
 
@@ -1901,7 +1923,8 @@ class VAScalingModel(object):
                                             * (self.min_hgt_0 - self.max_hgt))
 
         self.__init__(year_start, area_m2_start, min_hgt_start,
-                      self.max_hgt, self.mb_model)
+                      self.max_hgt, self.mb_model,
+                      glacier_type=self.glacier_type)
 
     def run_and_compare(self, model_ref, time_scale_factor=1,
                         instant_geometry_change=False):
@@ -1931,11 +1954,6 @@ class VAScalingModel(object):
 
         return rel_error
 
-    def start_area_minimization(start_year):
-        """Find the start area which results in a best fitting area after
-        model integration.
-
-        """
 
 
 class FileModel(object):
@@ -2020,7 +2038,7 @@ class FileModel(object):
         # get values from given year
         self.run_until(y0)
         # define current year and state as initial state
-        self.year_0 = self.y0
+        self.year_0 = self.year
         self.length_m_0 = self.length_m
         self.area_m2_0 = self.area_m2
         self.volume_m3_0 = self.volume_m3
@@ -2043,7 +2061,7 @@ class FileModel(object):
     def run_until(self, year=None, month=None):
         """Mimics the model's behavior by reading the values of the given year
         from the *.nc file. """
-        # adjust date according to the hydrological floating year convention
+        # adjust date according to the floating year convention
         if month is not None:
             year += (month - 1) / 12
         # select given date from the *.nc file
