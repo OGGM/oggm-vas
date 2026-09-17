@@ -91,3 +91,41 @@ Design decisions for the port:
 - `prcp_clim` (the turnover in the response-time formula, and the last hidden dependency
   on t*) is redefined as the mean solid precipitation over the calibration reference period.
 - The workflow assumes standard OGGM prepro L3 glacier directories.
+
+### State after the port (Sep 2026)
+
+Done, on branch `dev`: the mass balance model, the calibration, the dynamical
+model, the run tasks and the test suite. `pytest oggm_vas/tests/test_vas.py`
+is green (23 tests, ~45 s, no downloads needed).
+
+Verified end to end on prepro L3 elevation-band W5E5 directories for three
+Alpine glaciers: `vascaling.mb_calibration_from_geodetic_mb` fetches Hugonnet,
+`decide_winter_precip_factor` gives a per-glacier prcp_fac (2.96 to 3.75),
+melt_f lands between 2.0 and 4.2, and the calibrated model reproduces the
+target dmdtda to ~1e-13. temp_bias stays 0 because melt_f alone matches the
+observations. See `examples/run_alps.py`.
+
+On Hintereisferner, the VAS and OGGM specific mass balance series correlate
+at 0.93 over 1953-2002 when calibrated on the same value. VAS has less
+variance and a lower melt_f (2.5 vs 6.7), because it melts at a single
+terminus temperature instead of integrating over the hypsometry.
+
+Two things upstream OGGM does that get in the way, both worked around here
+rather than patched (OGGM changes are a separate job):
+
+- `mb_calibration_from_scalar_mb` reads `inversion_flowlines` unconditionally
+  (massbalance.py:4920) and silently wraps the model class in
+  `MultipleFlowlineMassBalance` when a glacier has more than one flowline
+  (:5044). So VAS needs elevation band directories. `VAScalingMassBalance.
+  get_specific_mb` raises if it is handed more than one flowline.
+- `mb_calibration_from_geodetic_mb`'s `override_missing` only catches a
+  KeyError, so it does not help when the requested period is absent from the
+  Hugonnet table (an empty selection raises IndexError instead).
+- `utils.compile_run_output` rejects any diagnostic variable it does not know
+  and reads water_level/glen_a/fs unconditionally. Hence the split into
+  `model_diagnostics` (geometry, OGGM readable) and `vas_diagnostics` (full
+  VAS output).
+
+Still open: nothing blocking. `match_regional_geodetic_mb` was deleted rather
+than ported -- it shifted a per-glacier `bias` that the new calibration always
+leaves at 0. If regional matching is needed again it should shift melt_f.
