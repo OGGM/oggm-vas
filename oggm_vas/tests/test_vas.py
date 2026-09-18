@@ -326,13 +326,13 @@ class TestVAScalingModel(unittest.TestCase):
             mbmod.get_specific_mb(fls=fls * 2, year=1975)
 
     def test_prcp_clim(self):
-        """The turnover must be the mean solid precipitation over the
-        calibration period, and it must not depend on the terminus position.
+        """The turnover must be the mean solid precipitation over the whole
+        climate record, and must not depend on the terminus position.
         """
         gdir = self._calibrated_gdir()
         mbmod = vascaling.VAScalingMassBalance(gdir)
 
-        years = np.arange(*REF_MB_YEARS)
+        years = np.unique(mbmod.years)
         prcp_sol = np.array([mbmod.get_annual_climate(None, year=y)[3].sum()
                              for y in years])
         np.testing.assert_allclose(mbmod.prcp_clim, prcp_sol.mean() * 1e-3)
@@ -340,6 +340,12 @@ class TestVAScalingModel(unittest.TestCase):
         # the turnover is a climatology at the RGI date geometry
         mbmod.min_hgt = mbmod.min_hgt_0 + 300
         np.testing.assert_allclose(mbmod.prcp_clim, prcp_sol.mean() * 1e-3)
+
+        # it must not depend on anything the calibration writes, otherwise
+        # a glacier evolves differently during and after a calibration
+        sub = vascaling.VAScalingMassBalance(
+            gdir, prcp_clim_period='1953-01-01_2003-01-01')
+        assert sub.prcp_clim != mbmod.prcp_clim
 
     # -- dynamical model
 
@@ -498,13 +504,83 @@ class TestVAScalingModel(unittest.TestCase):
             model.run_until_equilibrium()
 
     def test_find_start_area(self):
-        """The optimised start area must reproduce the RGI area."""
+        """The start area must actually reproduce the RGI area."""
         gdir = self._calibrated_gdir()
-        res = vascaling.find_start_area(gdir, year_start=1851)
-        # the relative area error at the comparison date must be tiny
-        assert res.fun < 1e-4
-        # and Hintereisferner was bigger in 1851 than at the RGI date
-        assert res.x > gdir.rgi_area_m2
+        area_start = vascaling.find_start_area(gdir, year_start=1851)
+
+        # re-run from that area and check we land on the RGI area
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+        target_yr = vascaling.core._target_year(gdir, mbmod, None)
+        model_ref = vascaling.core._reference_model(gdir, mbmod, target_yr)
+        model = vascaling.core._start_model(model_ref, area_start, 1851)
+        model.run_until(target_yr)
+        np.testing.assert_allclose(model.area_m2, gdir.rgi_area_m2, rtol=1e-4)
+
+    def test_find_start_area_raises_instead_of_hitting_the_bound(self):
+        """A start area that cannot be reached must raise, not be returned.
+
+        `minimize_scalar(method='bounded')` converges onto its own bound and
+        reports success, which used to hand back a silent non-match.
+        """
+        gdir = self._calibrated_gdir()
+        with pytest.raises(RuntimeError) as err:
+            vascaling.find_start_area(gdir, year_start=1851,
+                                      max_area_factor=1.0)
+        assert 'reproduces' in str(err.value)
+
+    def test_run_reconstruction(self):
+        """The reconstruction must pass through the observed area."""
+        gdir = self._calibrated_gdir()
+        model = vascaling.run_reconstruction(gdir, ys=1950,
+                                             output_filesuffix='_rec')
+
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+        target_yr = vascaling.core._target_year(gdir, mbmod, None)
+        with xr.open_dataset(gdir.get_filepath('vas_diagnostics',
+                                               filesuffix='_rec')) as ds:
+            ds = ds.load()
+
+        # the run goes from the requested start to the end of the record
+        assert int(ds.time[0]) == 1950
+        assert int(ds.time[-1]) == int(mbmod.ye) + 1
+        # and the RGI area is matched at the inventory date
+        np.testing.assert_allclose(float(ds.area_m2.sel(time=target_yr)),
+                                   gdir.rgi_area_m2, rtol=1e-4)
+        # which `run_from_climate_data` would not do from the same start year
+        naive = vascaling.run_from_climate_data(gdir, ys=1950,
+                                                ye=target_yr,
+                                                output_filesuffix='_naive')
+        assert (abs(naive.area_m2 - gdir.rgi_area_m2) >
+                abs(float(ds.area_m2.sel(time=target_yr)) - gdir.rgi_area_m2))
+        assert model.year == int(mbmod.ye) + 1
+
+    def test_mb_calibration_dynamic(self):
+        """The dynamic calibration must match the mass change of the
+        *evolving* glacier, not of the fixed RGI geometry.
+        """
+        gdir = self._gdir()
+        period = '1953-01-01_2003-01-01'
+        # a 1950 start keeps the terminus inside the DEM range, see the
+        # note on the terminus elevation parameterisation in the docstring
+        df = vascaling.mb_calibration_dynamic_from_geodetic_mb(
+            gdir, ref_mb=REF_MB, ref_mb_period=period, prcp_fac=2.5,
+            ys=1950, overwrite_gdir=True)
+
+        assert cfg.PARAMS['melt_f_min'] <= df['melt_f'] <= cfg.PARAMS['melt_f_max']
+        assert df['vas_dynamic_calibration'] is True
+        # it must have matched the observation
+        np.testing.assert_allclose(df['vas_dmdtda_mismatch'], 0, atol=1.)
+
+        # and the reconstruction must reproduce that mass change
+        model = vascaling.run_reconstruction(gdir, ys=1950,
+                                             output_filesuffix='_dyn')
+        with xr.open_dataset(gdir.get_filepath('vas_diagnostics',
+                                               filesuffix='_dyn')) as ds:
+            ds = ds.load()
+        dmdtda = ((float(ds.volume_m3.sel(time=2003)) -
+                   float(ds.volume_m3.sel(time=1953))) *
+                  cfg.PARAMS['ice_density'] / gdir.rgi_area_m2 / 50)
+        np.testing.assert_allclose(dmdtda, REF_MB, atol=1.)
 
     def test_fixed_geometry_mass_balance(self):
         """The fixed geometry series must match the mass balance model."""

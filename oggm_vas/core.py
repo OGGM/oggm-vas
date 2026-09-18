@@ -14,7 +14,7 @@ from time import gmtime, strftime
 import numpy as np
 import pandas as pd
 import xarray as xr
-from scipy.optimize import minimize_scalar
+from scipy.optimize import brentq
 from sklearn.linear_model import LinearRegression
 
 # import OGGM modules
@@ -306,7 +306,8 @@ class VAScalingMassBalance(MonthlyTIModel):
     `mb_model_class=VAScalingMassBalance`.
     """
 
-    def __init__(self, gdir, min_hgt=None, max_hgt=None, **kwargs):
+    def __init__(self, gdir, min_hgt=None, max_hgt=None,
+                 prcp_clim_period=None, **kwargs):
         """Initialize.
 
         Parameters
@@ -318,6 +319,11 @@ class VAScalingMassBalance(MonthlyTIModel):
         max_hgt : float, optional
             maximum glacier surface elevation [m asl.]. Defaults to the
             maximum glacier surface elevation of the RGI outline.
+        prcp_clim_period : str, optional
+            the period over which to average the climatological solid
+            precipitation used for the response time scales, e.g.
+            '2000-01-01_2020-01-01'. Defaults to the whole climate record,
+            see `prcp_clim`.
         **kwargs
             passed to `oggm.core.massbalance.MonthlyTIModel`, i.e. `melt_f`,
             `temp_bias`, `prcp_fac`, `filename`, `input_filesuffix`,
@@ -334,6 +340,7 @@ class VAScalingMassBalance(MonthlyTIModel):
         self.min_hgt_0 = min_hgt
         self.min_hgt = min_hgt
         self.max_hgt = max_hgt
+        self.prcp_clim_period = prcp_clim_period
 
         super(VAScalingMassBalance, self).__init__(gdir, **kwargs)
 
@@ -402,28 +409,29 @@ class VAScalingMassBalance(MonthlyTIModel):
 
         This is the "turnover" used by `VAScalingModel` to estimate the
         glacier response time scales. Marzeion et. al. (2012) averaged it over
-        the 31 years centred on t*; t* no longer exists in OGGM, so it is
-        averaged over the mass balance calibration reference period instead
-        (falling back to `geodetic_mb_period` if the glacier has not been
-        calibrated yet).
+        the 31 years centred on t*, which no longer exists in OGGM.
+
+        It is averaged over the whole climate record instead. Tying it to the
+        calibration period would make it depend on a value the calibration
+        itself writes, so the glacier would evolve differently during and
+        after a dynamic calibration. The response time is a property of the
+        glacier and its climate rather than of the observation period, and the
+        full record samples it better. Pass `prcp_clim_period` to override.
 
         It is evaluated at the RGI date geometry and, as in the original
         model, limited to a minimum of 10 mm w.e. yr-1.
         """
-        try:
-            period = self.gdir.settings['reference_period']
-        except KeyError:
-            period = None
-        if period is None or period == 'custom':
-            period = self.gdir.settings['geodetic_mb_period']
-
-        y0, y1 = [int(y.split('-')[0]) for y in period.split('_')]
-        years = [y for y in np.arange(y0, y1) if self.is_year_valid(y)]
-        if not years:
-            raise InvalidWorkflowError(
-                f'{self.gdir.rgi_id}: the reference period {period} is not '
-                f'covered by the climate data '
-                f'[{self.ys_float}, {self.ye_float}].')
+        if self.prcp_clim_period is None:
+            years = np.unique(self.years)
+        else:
+            y0, y1 = [int(y.split('-')[0])
+                      for y in self.prcp_clim_period.split('_')]
+            years = [y for y in np.arange(y0, y1) if self.is_year_valid(y)]
+            if not years:
+                raise InvalidWorkflowError(
+                    f'{self.gdir.rgi_id}: the period '
+                    f'{self.prcp_clim_period} is not covered by the climate '
+                    f'data [{self.ys_float}, {self.ye_float}].')
 
         # the turnover is a climatology: use the RGI date geometry, whatever
         # the terminus is doing at the moment
@@ -476,103 +484,188 @@ def mb_calibration_from_geodetic_mb(gdir, **kwargs):
     return massbalance.mb_calibration_from_geodetic_mb.unwrapped(gdir, **kwargs)
 
 
-@entity_task(log)
-def find_start_area(gdir, year_start=1851, adjust_term_elev=False,
-                    instant_geometry_change=False):
-    """This task find the start area for the given glacier, which results in
-    the best results after the model integration (i.e., modeled glacier surface
-    closest to measured RGI surface in 2003).
+def _rgi_year(gdir):
+    """The RGI inventory year of a glacier directory."""
+    try:
+        return gdir.rgi_date.year
+    except AttributeError:
+        return gdir.rgi_date
 
-    All necessary prepro task (gis, centerline, climate) must be executed
-    beforehand, as well as the mass balance calibration.
+
+def _target_year(gdir, mb_model, target_yr=None):
+    """The year at which the model geometry is matched against the RGI.
+
+    Like OGGM, the RGI outline is taken to describe the glacier at the start
+    of the year following the inventory date.
+    """
+    if target_yr is None:
+        target_yr = _rgi_year(gdir) + 1
+    if target_yr > mb_model.ye + 1:
+        log.warning('(%s) the RGI date (%d) is not covered by the climate '
+                    'data, matching the geometry in %d instead.',
+                    gdir.rgi_id, target_yr - 1, mb_model.ye)
+        target_yr = mb_model.ye + 1
+    return target_yr
+
+
+def _reference_model(gdir, mb_model, target_yr):
+    """A `VAScalingModel` of the observed (RGI) glacier at `target_yr`."""
+    min_hgt, max_hgt = get_min_max_elevation(gdir)
+    return VAScalingModel(year_0=target_yr, area_m2_0=gdir.rgi_area_m2,
+                          min_hgt=min_hgt, max_hgt=max_hgt,
+                          mb_model=mb_model,
+                          glacier_type=gdir.glacier_type)
+
+
+def _start_model(model_ref, area_m2_start, year_start,
+                 adjust_term_elev=False):
+    """A copy of `model_ref` rescaled to `area_m2_start` at `year_start`."""
+    model = VAScalingModel(year_0=model_ref.year_0,
+                           area_m2_0=model_ref.area_m2_0,
+                           min_hgt=model_ref.min_hgt_0,
+                           max_hgt=model_ref.max_hgt,
+                           mb_model=model_ref.mb_model,
+                           glacier_type=model_ref.glacier_type)
+    model.create_start_glacier(area_m2_start, year_start=year_start,
+                               adjust_term_elev=adjust_term_elev)
+    return model
+
+
+def find_start_area_from_model(model_ref, year_start, target_yr=None,
+                               adjust_term_elev=False,
+                               instant_geometry_change=False,
+                               max_area_factor=100, rtol=1e-4):
+    """Find the glacier area at `year_start` that reproduces the reference area.
+
+    The modelled area at `target_yr` grows monotonically with the area the
+    glacier started from, so this is a root finding problem, not a
+    minimisation. The bracket is widened until it contains the solution.
+    That matters for early start years and strongly negative mass balances: a
+    glacier that has since lost most of its mass needs a start area many times
+    its present one, and a fixed bracket silently returns its own bound.
+
+    Parameters
+    ----------
+    model_ref : :py:class:`oggm_vas.VAScalingModel`
+        the reference model, i.e. the observed glacier at `target_yr`
+    year_start : int
+        the year to start the reconstruction from
+    target_yr : int, optional
+        the year at which to match the reference area. Defaults to the
+        reference model's own year.
+    adjust_term_elev : bool, optional
+        whether to move the terminus elevation with the start area. Marzeion
+        et al. (2012) do not, which is the default. Note that with the default
+        the reconstructed glacier matches the RGI area at `target_yr` but sits
+        on a terminus elevation that is higher than the observed one.
+    instant_geometry_change : bool, optional
+        whether to neglect the response time scales
+    max_area_factor : float, optional
+        the largest start area to consider, as a multiple of the reference
+        area. Raises rather than returning a silent non-match.
+    rtol : float, optional
+        the relative area error that counts as a match
+
+    Returns
+    -------
+    float
+        the glacier surface area at `year_start` [m2]
+
+    """
+    if target_yr is None:
+        target_yr = model_ref.year_0
+    if year_start >= target_yr:
+        raise InvalidParamsError(f'year_start ({year_start}) must be before '
+                                 f'the target year ({target_yr}).')
+
+    def _rel_area_error(area_m2_start):
+        """Signed relative area error at the target year. Decreases
+        monotonically with the start area."""
+        model = _start_model(model_ref, area_m2_start, year_start,
+                             adjust_term_elev=adjust_term_elev)
+        return model.run_and_compare(
+            model_ref, instant_geometry_change=instant_geometry_change)
+
+    # a glacier this small cannot end up bigger than the reference one
+    area_lo = 100.
+    err_lo = _rel_area_error(area_lo)
+    if err_lo < 0:
+        raise RuntimeError(
+            f'Even a {area_lo:.0f} m2 glacier in {year_start} ends up larger '
+            f'than the reference area in {target_yr}: the mass balance is too '
+            f'positive for a reconstruction.')
+
+    # widen the bracket until it contains the solution
+    area_hi = model_ref.area_m2_0
+    err_hi = _rel_area_error(area_hi)
+    factor = 2.
+    while err_hi > 0:
+        if factor > max_area_factor:
+            raise RuntimeError(
+                f'No start area below {max_area_factor:.0f} x the reference '
+                f'area reproduces the {target_yr} area from {year_start} '
+                f'(best relative area error {err_hi:.3f}). The mass balance '
+                'is likely too negative, or the start year too early.')
+        area_hi = factor * model_ref.area_m2_0
+        err_hi = _rel_area_error(area_hi)
+        factor *= 2.
+
+    area_start = brentq(_rel_area_error, area_lo, area_hi, xtol=1.)
+
+    err = abs(_rel_area_error(area_start))
+    if err > rtol:
+        raise RuntimeError(f'The reconstructed area in {target_yr} is off by '
+                           f'{err:.3e} (relative), more than the requested '
+                           f'{rtol:.3e}.')
+
+    return area_start
+
+
+@entity_task(log)
+def find_start_area(gdir, year_start=1851, target_yr=None,
+                    adjust_term_elev=False, instant_geometry_change=False,
+                    max_area_factor=100, rtol=1e-4, **kwargs):
+    """Find the glacier area at `year_start` that reproduces the RGI area.
+
+    The glacier is integrated from `year_start` to the RGI date and the start
+    area is adjusted until the modelled area matches the inventory. All
+    preprocessing tasks (gis, climate) and the mass balance calibration must
+    have run beforehand.
 
     Parameters
     ----------
     gdir : :py:class:`oggm.GlacierDirectory`
     year_start : int, optional
-        year at the beginning of the model integration, default = 1851
-        (best choice for working with HISTALP data)
-    adjust_term_elev: bool, optional, default=False
-        flag deciding wheter or not to update the terminus elevation with the
-        new initial glacier surface area (not done by Marzeion et al. (2012))
+        year at the beginning of the reconstruction, default = 1851
+    target_yr : int, optional
+        the year at which to match the RGI area. Defaults to the year after
+        the inventory date, clipped to the end of the climate record.
+    adjust_term_elev : bool, optional
+        whether to move the terminus elevation with the start area,
+        default = False (as in Marzeion et al., 2012)
+    instant_geometry_change : bool, optional
+        whether to neglect the response time scales, default = False
+    max_area_factor : float, optional
+        the largest start area to consider, as a multiple of the RGI area
+    rtol : float, optional
+        the relative area error that counts as a match
+    **kwargs
+        passed to :py:class:`VAScalingMassBalance`
 
     Returns
     -------
-    :py:class:`scipy.optimize.OptimizeResult`
+    float
+        the glacier surface area at `year_start` [m2]
 
     """
-
-    # instance the mass balance models
-    mbmod = VAScalingMassBalance(gdir)
-
-    # get reference area and year from RGI
-    a_rgi = gdir.rgi_area_m2
-    try:
-        y_rgi = gdir.rgi_date.year
-    except AttributeError:
-        y_rgi = gdir.rgi_date
-    y_rgi += 1
-    # reaching year y_rgi needs a mass balance for y_rgi - 1, so stop at the
-    # end of the climate record if the inventory date is younger than it
-    if y_rgi > mbmod.ye + 1:
-        log.warning('(%s) the RGI date (%d) is not covered by the climate '
-                    'data, comparing at %d instead.',
-                    gdir.rgi_id, y_rgi - 1, mbmod.ye)
-        y_rgi = mbmod.ye + 1
-    # get min and max glacier surface elevation
-    h_min, h_max = get_min_max_elevation(gdir)
-
-    # set up the glacier model with the reference values (from RGI)
-    model_ref = VAScalingModel(year_0=y_rgi, area_m2_0=a_rgi,
-                               min_hgt=h_min, max_hgt=h_max,
-                               mb_model=mbmod, glacier_type=gdir.glacier_type)
-
-    def _to_minimize(area_m2_start, ref, _year_start=year_start,
-                     _adjust_term_elev=adjust_term_elev):
-        """Initialize VAS glacier model as copy of the reference model (ref)
-        and adjust the model to the given starting area (area_m2_start) and
-        starting year (1851). Let the model evolve to the same year as the
-        reference model. Compute and return the relative absolute area error.
-
-        Parameters
-        ----------
-        area_m2_start : float
-        ref : :py:class:`oggm.VAScalingModel`
-        _year_start : float, optional
-             the default value is inherited from the surrounding task
-        adjust_term_elev: bool, optional
-            flag deciding wheter or not to update the terminus elevation with
-            the new initial glacier surface area
-
-        Returns
-        -------
-        float
-            relative absolute area estimate error
-
-        """
-        # define model
-        model_tmp = VAScalingModel(year_0=ref.year_0,
-                                   area_m2_0=ref.area_m2_0,
-                                   min_hgt=ref.min_hgt_0,
-                                   max_hgt=ref.max_hgt,
-                                   mb_model=ref.mb_model,
-                                   glacier_type=ref.glacier_type)
-        # scale to desired starting size
-        model_tmp.create_start_glacier(area_m2_start, year_start=_year_start,
-                                       adjust_term_elev=_adjust_term_elev)
-        # run and compare, return relative error
-        return np.abs(model_tmp.run_and_compare(ref,
-                                                instant_geometry_change=
-                                                instant_geometry_change))
-
-    # define bounds - between 100m2 and two times the reference size
-    area_m2_bounds = [100, 2 * model_ref.area_m2_0]
-    # run minimization
-    minimization_res = minimize_scalar(_to_minimize, args=(model_ref),
-                                       bounds=area_m2_bounds,
-                                       method='bounded')
-
-    return minimization_res
+    mbmod = VAScalingMassBalance(gdir, **kwargs)
+    target_yr = _target_year(gdir, mbmod, target_yr)
+    model_ref = _reference_model(gdir, mbmod, target_yr)
+    return find_start_area_from_model(
+        model_ref, year_start, target_yr=target_yr,
+        adjust_term_elev=adjust_term_elev,
+        instant_geometry_change=instant_geometry_change,
+        max_area_factor=max_area_factor, rtol=rtol)
 
 
 @entity_task(log)
@@ -790,100 +883,362 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     return model
 
 
-@entity_task(log)
-def run_historic_from_climate_data(gdir, ys, ye=None,
-                                   climate_filename='climate_historical',
-                                   climate_input_filesuffix='',
-                                   output_filesuffix='',
-                                   bias=0, **kwargs):
-    """ Runs a glacier with climate input from the given start year ys. Thereby
-    the glacier model is initialized so that the glacier area equals the RGI
-    area at the RGI date. If the RGI date is before the start year the model
-    starts at that year (can be cropped afterwards).
+@entity_task(log, writes=['model_diagnostics', 'vas_diagnostics'])
+def run_reconstruction(gdir, ys=None, ye=None, target_yr=None,
+                       climate_filename='climate_historical',
+                       climate_input_filesuffix='', output_filesuffix='',
+                       bias=0, adjust_term_elev=False,
+                       instant_geometry_change=False,
+                       max_area_factor=100, rtol=1e-4, **kwargs):
+    """Reconstruct the glacier over the whole available climate record.
 
-    TODO: this is a quick fix, should be revised at some point
+    This is one continuous run that passes through the observed geometry: the
+    area at `ys` is chosen so that the model reproduces the RGI area at the
+    inventory date, and the run then carries on to `ye`. Contrast with
+    :py:func:`run_from_climate_data`, which simply imposes the RGI area at
+    `ys` whatever year that is - fine when `ys` is the inventory date, wrong
+    otherwise.
 
-    This will initialize a :py:class:`oggm-vas.core.VAScalingMassBalance` and
-    a :py:class:`oggm-vas.core.VAScalingModel`.
+    Since the inventory date varies from the 1960s to the 2010s across the
+    RGI, this is what makes runs comparable between glaciers: they all pass
+    through their own observed area at their own observed date.
 
     Parameters
     ----------
     gdir : :py:class:`oggm.GlacierDirectory`
-        the glacier directory to process
-    ys : int
-        start year of the model run (default: from the glacier geometry
-        date if init_model_filesuffix is None, else init_model_yr), get
-        overriden by the glacier geometry date if it is before the start year
-    ye : int
-        end year of the model run (default: last year of the provided
-        climate file)
-    climate_filename : str
+    ys : int, optional
+        start year of the reconstruction. Defaults to the first year of the
+        climate record.
+    ye : int, optional
+        end year of the run. Defaults to the last year of the climate record.
+    target_yr : int, optional
+        the year at which to match the RGI area. Defaults to the year after
+        the inventory date.
+    climate_filename : str, optional
         name of the climate file, e.g. 'climate_historical' (default) or
         'gcm_data'
-    climate_input_filesuffix: str
+    climate_input_filesuffix : str, optional
         filesuffix for the input climate file
-    output_filesuffix : str
+    output_filesuffix : str, optional
         for the output file
-    bias : float
-        bias of the mb model. Default is to use the calibrated one, which
-        is often a better idea. For t* experiments it can be useful to set it
-        to zero
-    kwargs : dict
-        kwargs for the VAScalingMassBalance and/or VAScalingModel instances
+    bias : float, optional
+        the mass balance bias to apply, default 0
+    adjust_term_elev : bool, optional
+        whether to move the terminus elevation with the start area,
+        default = False (as in Marzeion et al., 2012)
+    instant_geometry_change : bool, optional
+        whether to neglect the response time scales, default = False
+    max_area_factor : float, optional
+        the largest start area to consider, as a multiple of the RGI area
+    rtol : float, optional
+        the relative area error that counts as a match
+    **kwargs
+        passed to :py:class:`VAScalingMassBalance`
+
+    Returns
+    -------
+    :py:class:`oggm_vas.VAScalingModel`
+
     """
-
-    # get RGI date
-    try:
-        rgi_date = gdir.rgi_date.year
-    except AttributeError:
-        rgi_date = gdir.rgi_date
-    # Start the year after the RGI date, so that we don't count the
-    # MB year of the inventory date in the simulation (as OGGM does)
-    rgi_date += 1
-
-    # start from RGI date if it is before the desired start year
-    if rgi_date < ys:
-        ys = rgi_date
-
-    # instance mass balance model
-    mb_mod = VAScalingMassBalance(gdir, bias=bias, filename=climate_filename,
-                                  input_filesuffix=climate_input_filesuffix,
-                                  ys=ys, ye=ye, **kwargs)
-
+    mbmod = VAScalingMassBalance(gdir, filename=climate_filename,
+                                 input_filesuffix=climate_input_filesuffix,
+                                 bias=bias, **kwargs)
+    if ys is None:
+        ys = int(mbmod.ys)
     if ye is None:
-        # Decide from climate
-        ye = mb_mod.ye
+        # we can run the last year with data as well
+        ye = int(mbmod.ye) + 1
 
-    # get needed values from glacier directory
-    min_hgt, max_hgt = get_min_max_elevation(gdir)
-    # find start area that results in RGI area
-    init_area_m2 = find_start_area(gdir, year_start=ys, adjust_term_elev=False,
-                                   instant_geometry_change=False)
-    if init_area_m2.success:
-        # use minimization result as initial area
-        init_area_m2 = float(init_area_m2.x)
-    else:
-        # throw error if minimization was unsuccessful
-        raise RuntimeError(f'No start area for {gdir.rgi_id} '
-                           f'in {ys} could be found')
+    target_yr = _target_year(gdir, mbmod, target_yr)
+    if ys >= target_yr:
+        raise InvalidParamsError(
+            f'{gdir.rgi_id}: cannot reconstruct from {ys}, which is not '
+            f'before the date the geometry is matched at ({target_yr}).')
+    if ye < target_yr:
+        raise InvalidParamsError(
+            f'{gdir.rgi_id}: the run ends in {ye}, before the date the '
+            f'geometry is matched at ({target_yr}).')
 
-    # instance the model
-    model = VAScalingModel(year_0=ys, area_m2_0=init_area_m2,
-                           min_hgt=min_hgt, max_hgt=max_hgt,
-                           mb_model=mb_mod, glacier_type=gdir.glacier_type)
+    # find the start area that reproduces the observed one
+    model_ref = _reference_model(gdir, mbmod, target_yr)
+    area_m2_start = find_start_area_from_model(
+        model_ref, ys, target_yr=target_yr,
+        adjust_term_elev=adjust_term_elev,
+        instant_geometry_change=instant_geometry_change,
+        max_area_factor=max_area_factor, rtol=rtol)
 
-    # specify where to store model diagnostics
+    model = _start_model(model_ref, area_m2_start, ys,
+                         adjust_term_elev=adjust_term_elev)
+
     diag_path = gdir.get_filepath('model_diagnostics',
                                   filesuffix=output_filesuffix,
                                   delete=True)
     vas_diag_path = gdir.get_filepath('vas_diagnostics',
                                       filesuffix=output_filesuffix,
                                       delete=True)
-    # run
-    model.run_until_and_store(year_end=ye, diag_path=diag_path,
-                              vas_diag_path=vas_diag_path)
+    model.run_until_and_store(
+        year_end=ye, diag_path=diag_path, vas_diag_path=vas_diag_path,
+        instant_geometry_change=instant_geometry_change)
+
+    gdir.add_to_diagnostics('vas_reconstruction_start_yr', int(ys))
+    gdir.add_to_diagnostics('vas_reconstruction_start_area_m2',
+                            float(area_m2_start))
+    gdir.add_to_diagnostics('vas_reconstruction_target_yr', int(target_yr))
 
     return model
+
+
+def _dmdtda_from_reconstruction(gdir, mb_model, yr0, yr1, ys, target_yr,
+                                adjust_term_elev=False,
+                                instant_geometry_change=False,
+                                max_area_factor=100, rtol=1e-4):
+    """Geodetic mass balance of a reconstructed glacier, in kg m-2 yr-1.
+
+    Same convention as OGGM's dynamic melt_f calibration: the mass change
+    between `yr0` and `yr1` divided by the (fixed) RGI area and by the length
+    of the period.
+    """
+    model_ref = _reference_model(gdir, mb_model, target_yr)
+    area_m2_start = find_start_area_from_model(
+        model_ref, ys, target_yr=target_yr,
+        adjust_term_elev=adjust_term_elev,
+        instant_geometry_change=instant_geometry_change,
+        max_area_factor=max_area_factor, rtol=rtol)
+    model = _start_model(model_ref, area_m2_start, ys,
+                         adjust_term_elev=adjust_term_elev)
+
+    model.run_until(yr0, instant_geometry_change=instant_geometry_change)
+    volume_yr0 = model.volume_m3
+    model.run_until(yr1, instant_geometry_change=instant_geometry_change)
+    volume_yr1 = model.volume_m3
+
+    dmdtda = ((volume_yr1 - volume_yr0) * model.rho / gdir.rgi_area_m2 /
+              (yr1 - yr0))
+    return dmdtda, area_m2_start
+
+
+@entity_task(log, writes=['mb_calib'])
+def mb_calibration_dynamic_from_geodetic_mb(gdir, *,
+                                            ref_mb=None, ref_mb_err=None,
+                                            ref_mb_period=None,
+                                            ys=None, target_yr=None,
+                                            melt_f_min=None, melt_f_max=None,
+                                            prcp_fac=None, temp_bias=None,
+                                            adjust_term_elev=False,
+                                            instant_geometry_change=False,
+                                            max_area_factor=100, rtol=1e-4,
+                                            write_to_gdir=True,
+                                            overwrite_gdir=False,
+                                            **kwargs):
+    """Calibrate `melt_f` on geodetic MB using the *evolving* glacier.
+
+    :py:func:`mb_calibration_from_geodetic_mb` matches the observed mass
+    change with the mass balance evaluated on the fixed RGI geometry. That
+    ignores two things: the glacier changes shape during the observation
+    period, and the RGI date is not the start of that period - it ranges from
+    the 1960s to the 2010s across the inventory, so for most glaciers the RGI
+    geometry is not the geometry the satellites saw.
+
+    This task removes both approximations. For each trial `melt_f` it
+    reconstructs the glacier from `ys`, constrained to reproduce the RGI area
+    at the inventory date, and compares the modelled mass change over the
+    reference period against the observation. It is OGGM's dynamic melt_f
+    calibration, but the "spinup" is a one dimensional root find on the start
+    area rather than a flowline run, so it costs milliseconds.
+
+    Only `melt_f` is calibrated. `prcp_fac` and `temp_bias` are taken as
+    given, exactly as in OGGM's dynamic calibration.
+
+    Parameters
+    ----------
+    gdir : :py:class:`oggm.GlacierDirectory`
+    ref_mb : float, optional
+        the reference mass balance to match [kg m-2 yr-1]. Defaults to
+        Hugonnet et al. (2021).
+    ref_mb_err : float, optional
+        its error [kg m-2 yr-1], stored but not used in the calibration
+    ref_mb_period : str, optional
+        e.g. '2000-01-01_2020-01-01'. Defaults to
+        `settings['geodetic_mb_period']`.
+    ys : int, optional
+        the year to reconstruct from. Defaults to the first year of the
+        climate record.
+    target_yr : int, optional
+        the year at which to match the RGI area. Defaults to the year after
+        the inventory date.
+    melt_f_min, melt_f_max : float, optional
+        bounds for the melt factor. Default to the settings.
+    prcp_fac : float, optional
+        the precipitation factor to use. Defaults to the settings, or to
+        `decide_winter_precip_factor` if those leave it open.
+    temp_bias : float, optional
+        the temperature bias to use. Defaults to the settings, else 0.
+    adjust_term_elev : bool, optional
+        whether to move the terminus elevation with the start area
+    instant_geometry_change : bool, optional
+        whether to neglect the response time scales
+    max_area_factor : float, optional
+        the largest start area to consider, as a multiple of the RGI area
+    rtol : float, optional
+        the relative area error that counts as a geometry match
+    write_to_gdir : bool, optional
+        whether to write the calibrated parameters to the glacier settings
+    overwrite_gdir : bool, optional
+        whether to overwrite an existing calibration
+    **kwargs
+        passed to :py:class:`VAScalingMassBalance`
+
+    Returns
+    -------
+    dict
+        the calibrated parameters
+
+    """
+    if melt_f_min is None:
+        melt_f_min = gdir.settings['melt_f_min']
+    if melt_f_max is None:
+        melt_f_max = gdir.settings['melt_f_max']
+
+    # the reference mass balance
+    if ref_mb_period is None:
+        ref_mb_period = gdir.settings['geodetic_mb_period']
+    if ref_mb is None:
+        df = utils.get_geodetic_mb_dataframe(
+            rgi_version=gdir.rgi_version).loc[gdir.rgi_id]
+        df = df.loc[df['period'] == ref_mb_period]
+        if len(df) == 0:
+            raise InvalidWorkflowError(
+                f'{gdir.rgi_id}: no geodetic mass balance available for the '
+                f'period {ref_mb_period}.')
+        # dmdtda is in m w.e. yr-1
+        ref_mb = float(df['dmdtda'].iloc[0]) * 1000
+        if ref_mb_err is None:
+            ref_mb_err = float(df['err_dmdtda'].iloc[0]) * 1000
+
+    yr0, yr1 = [int(y.split('-')[0]) for y in ref_mb_period.split('_')]
+
+    # the parameters we are not calibrating
+    if prcp_fac is None:
+        if gdir.settings['prcp_fac'] is None:
+            prcp_fac = massbalance.decide_winter_precip_factor(gdir)
+        else:
+            prcp_fac = gdir.settings['prcp_fac']
+    if temp_bias is None:
+        try:
+            temp_bias = gdir.settings['temp_bias']
+        except KeyError:
+            temp_bias = 0
+
+    def _mb_model(melt_f):
+        return VAScalingMassBalance(gdir, melt_f=melt_f, prcp_fac=prcp_fac,
+                                    temp_bias=temp_bias,
+                                    check_calib_params=False, **kwargs)
+
+    mbmod = _mb_model(melt_f_min)
+    if ys is None:
+        ys = int(mbmod.ys)
+    target_yr = _target_year(gdir, mbmod, target_yr)
+    if ys > yr0:
+        raise InvalidParamsError(
+            f'{gdir.rgi_id}: the reconstruction has to start before the '
+            f'reference period, but ys={ys} is after {yr0}.')
+    if ys >= target_yr:
+        raise InvalidParamsError(
+            f'{gdir.rgi_id}: the reconstruction has to start before the date '
+            f'the geometry is matched at, but ys={ys} is not before '
+            f'{target_yr}.')
+    if not (mbmod.is_year_valid(yr0) and mbmod.is_year_valid(yr1 - 1)):
+        raise InvalidWorkflowError(
+            f'{gdir.rgi_id}: the reference period {ref_mb_period} is not '
+            f'covered by the climate data [{mbmod.ys}, {mbmod.ye}].')
+
+    state = {}
+
+    def _cost(melt_f):
+        dmdtda, area_m2_start = _dmdtda_from_reconstruction(
+            gdir, _mb_model(melt_f), yr0, yr1, ys, target_yr,
+            adjust_term_elev=adjust_term_elev,
+            instant_geometry_change=instant_geometry_change,
+            max_area_factor=max_area_factor, rtol=rtol)
+        state['area_m2_start'] = area_m2_start
+        state['dmdtda'] = dmdtda
+        return dmdtda - ref_mb
+
+    def _feasible(melt_f):
+        try:
+            _cost(melt_f)
+            return True
+        except RuntimeError:
+            return False
+
+    # a large melt_f can ask for a start glacier bigger than we allow. Shrink
+    # the upper bound to the largest melt_f we can actually reconstruct.
+    if not _feasible(melt_f_max):
+        if not _feasible(melt_f_min):
+            raise RuntimeError(
+                f'{gdir.rgi_id}: no melt factor in '
+                f'[{melt_f_min}, {melt_f_max}] allows a reconstruction from '
+                f'{ys}. Try a later `ys` or a larger `max_area_factor`.')
+        lo, hi = melt_f_min, melt_f_max
+        for _ in range(20):
+            mid = 0.5 * (lo + hi)
+            if _feasible(mid):
+                lo = mid
+            else:
+                hi = mid
+        log.warning('(%s) melt_f_max reduced from %.2f to %.2f: a larger '
+                    'melt factor cannot be reconstructed from %d.',
+                    gdir.rgi_id, melt_f_max, lo, ys)
+        melt_f_max = lo
+
+    try:
+        melt_f = brentq(_cost, melt_f_min, melt_f_max, xtol=1e-4)
+        mismatch = _cost(melt_f)
+    except ValueError:
+        # no sign change in the bracket: pin to the closer bound, as
+        # `mb_calibration_from_scalar_mb` does
+        cost_min = _cost(melt_f_min)
+        cost_max = _cost(melt_f_max)
+        melt_f = melt_f_min if abs(cost_min) < abs(cost_max) else melt_f_max
+        mismatch = _cost(melt_f)
+        log.warning('(%s) could not match the geodetic mass balance with a '
+                    'melt factor in [%.2f, %.2f]: using %.2f, which is off '
+                    'by %.1f kg m-2 yr-1.', gdir.rgi_id, melt_f_min,
+                    melt_f_max, melt_f, mismatch)
+
+    df = dict()
+    df['rgi_id'] = gdir.rgi_id
+    df['bias'] = 0
+    df['melt_f'] = melt_f
+    df['prcp_fac'] = prcp_fac
+    df['temp_bias'] = temp_bias
+    df['reference_mb'] = ref_mb
+    df['reference_mb_err'] = ref_mb_err
+    df['reference_period'] = ref_mb_period
+    df['mb_global_params'] = massbalance._mb_global_params_from_model(
+        _mb_model(melt_f))
+    df['baseline_climate_source'] = gdir.get_climate_info(
+        filename=mbmod.filename,
+        input_filesuffix=mbmod.input_filesuffix)['baseline_climate_source']
+    # what the dynamic calibration did on top of the static one
+    df['vas_dynamic_calibration'] = True
+    df['vas_reconstruction_start_yr'] = int(ys)
+    df['vas_reconstruction_start_area_m2'] = float(state['area_m2_start'])
+    df['vas_reconstruction_target_yr'] = int(target_yr)
+    df['vas_dmdtda_mismatch'] = float(mismatch)
+
+    if write_to_gdir:
+        stored = gdir.get_stored_settings()
+        if any(k in stored for k in ['melt_f', 'prcp_fac', 'temp_bias']) \
+                and not overwrite_gdir:
+            raise InvalidWorkflowError(
+                'There are already mass balance parameters stored in the '
+                'settings file. Set `overwrite_gdir` to True if you want to '
+                'overwrite a previous calibration.')
+        for key, value in df.items():
+            gdir.settings[key] = value
+
+    return df
 
 
 class _VASMassBalanceWrapper(MassBalanceModel):
