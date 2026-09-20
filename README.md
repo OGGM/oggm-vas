@@ -1,5 +1,7 @@
 ![oggm-logo](docs/_static/logo.png)
 
+[![Test](https://github.com/OGGM/oggm-vas/actions/workflows/run-tests.yml/badge.svg?branch=dev)](https://github.com/OGGM/oggm-vas/actions/workflows/run-tests.yml)
+
 OGGM compatible, python implementation of the [Marzeion et al. (2012)]()
 model.
 

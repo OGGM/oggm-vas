@@ -1,12 +1,12 @@
 """Tests for the volume/area scaling model in `core.py`."""
 
 # External libs
-import numpy as np
-import pandas as pd
-import datetime
 import os
-import shutil
 import copy
+import shutil
+
+import numpy as np
+import xarray as xr
 
 # import test libs
 import unittest
@@ -16,108 +16,110 @@ import pytest
 import oggm
 import oggm.cfg as cfg
 from oggm import utils
-from oggm.utils import (get_demo_file, ncDataset, md, rmsd_bc, rel_err,
-                        corrcoef)
-from oggm.core import (gis, climate, centerlines,
-                       massbalance, flowline, inversion)
+from oggm.utils import get_demo_file, rmsd_bc, rel_err, corrcoef
+from oggm.core import (gis, climate, centerlines, massbalance, flowline,
+                       inversion)
 from oggm.tests.funcs import get_test_dir
 import oggm_vas as vascaling
 
 # import gis libs
 gpd = pytest.importorskip('geopandas')
 
-
-def test_get_ref_tstars_filepath():
-    fp = vascaling.get_ref_tstars_filepath('vas_ref_tstars_rgi6_histalp.csv')
-    assert os.path.exists(fp)
-    with pytest.raises(ValueError):
-        vascaling.get_ref_tstars_filepath('dummy.csv')
+# The HISTALP demo file covers 1801-2002 for Hintereisferner. Calibrating on
+# a made up geodetic mass balance over this period keeps the tests offline.
+REF_MB = -500.
+REF_MB_YEARS = (1953, 2003)
 
 
 class TestVAScalingModel(unittest.TestCase):
-    """Unittest TestCase testing the implementation of the volume/area scaling
-    model, based on Marzeion et. al., 2012.
-    """
 
     def setUp(self):
-        """Instance the TestCase, create the test directory,
-        OGGM initialisation and setting paths and parameters.
-
-        Most input files, like the DEM, the climate file and the glacier
-        outline, come from the oggm-sample-data repository and my hence be
-        outdated. The test are performed on Hintereisferner (RGI60-11.00897),
-        running with HISTALP climate data and the matching mass balance
-        calibration parameters.
-        """
-
         # test directory
         self.testdir = os.path.join(get_test_dir(), 'tmp_vas')
-        if not os.path.exists(self.testdir):
-            os.makedirs(self.testdir)
         self.clean_dir()
 
-        # load default parameter file and set working directory
+        # load default parameter file
         vascaling.initialize()
         cfg.PATHS['working_dir'] = self.testdir
-        # set path to GIS files
+        cfg.PARAMS['use_multiprocessing'] = False
         cfg.PARAMS['use_intersects'] = False
         cfg.PATHS['dem_file'] = get_demo_file('hef_srtm.tif')
-        # set parameters for climate file and mass balance calibration
         cfg.PARAMS['baseline_climate'] = 'CUSTOM'
         cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
-        cfg.PARAMS['run_mb_calibration'] = True
-        # adjust parameters for HistAlp climate
-        cfg.PARAMS['prcp_scaling_factor'] = 2.5
-        cfg.PARAMS['temp_melt'] = -0.5
-        cfg.PARAMS['temp_all_solid'] = 0.
-
-        # coveralls.io has issues if multiprocessing is enabled
-        cfg.PARAMS['use_multiprocessing'] = False
+        # HISTALP is not supported by `decide_winter_precip_factor`, so the
+        # precipitation factor needs an explicit starting value
+        cfg.PARAMS['prcp_fac'] = 2.5
+        # the VAS model describes the glacier as a whole: one flowline only
+        cfg.PARAMS['use_multiple_flowlines'] = False
+        cfg.PARAMS['border'] = 40
 
     def tearDown(self):
-        """Removes the test directories."""
         self.rm_dir()
 
     def rm_dir(self):
-        """Removes the test directories."""
         shutil.rmtree(self.testdir)
 
     def clean_dir(self):
-        """Cleans the test directories."""
-        shutil.rmtree(self.testdir)
+        shutil.rmtree(self.testdir, ignore_errors=True)
         os.makedirs(self.testdir)
+
+    # -- helpers
+
+    def _gdir(self, flowlines=True):
+        """Glacier directory for Hintereisferner with climate data."""
+        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
+        entity = gpd.read_file(hef_file).iloc[0]
+        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
+
+        gis.define_glacier_region(gdir)
+        gis.glacier_masks(gdir)
+        if flowlines:
+            centerlines.compute_centerlines(gdir)
+            centerlines.initialize_flowlines(gdir)
+            centerlines.catchment_area(gdir)
+            centerlines.catchment_intersections(gdir)
+            centerlines.catchment_width_geom(gdir)
+            centerlines.catchment_width_correction(gdir)
+        climate.process_custom_climate_data(gdir)
+        return gdir
+
+    def _calibrated_gdir(self, ref_mb=REF_MB, **kwargs):
+        """Glacier directory with calibrated VAS mass balance parameters."""
+        gdir = self._gdir()
+        massbalance.mb_calibration_from_scalar_mb(
+            gdir, ref_mb=ref_mb, ref_mb_years=REF_MB_YEARS,
+            mb_model_class=vascaling.VAScalingMassBalance,
+            calibrate_param1='melt_f', calibrate_param2='prcp_fac',
+            calibrate_param3='temp_bias', overwrite_gdir=True,
+            overwrite_observations=True, **kwargs)
+        return gdir
+
+    def _vas_model(self, gdir=None, y0=None):
+        """A `VAScalingModel` of Hintereisferner, ready to run."""
+        if gdir is None:
+            gdir = self._calibrated_gdir()
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
+        if y0 is None:
+            y0 = gdir.get_climate_info()['baseline_yr_0']
+        model = vascaling.VAScalingModel(year_0=y0,
+                                         area_m2_0=gdir.rgi_area_m2,
+                                         min_hgt=min_hgt, max_hgt=max_hgt,
+                                         mb_model=mbmod,
+                                         glacier_type=gdir.glacier_type)
+        return gdir, model
+
+    # -- climate helpers
 
     def test_terminus_temp(self):
         """Testing the subroutine which computes the terminus temperature
-        from the given climate file and glacier DEM. Pretty straight forward
-        and somewhat useless, but nice finger exercise.
+        from the given climate file and glacier DEM.
         """
-
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid
-        gis.define_glacier_region(gdir, entity=entity)
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-
-        # read the following variable from the center pixel (46.83N 10.75E)
-        # of the Hintereisferner HistAlp climate file for the
-        # entire time period from October 1801 until September 2003
-        # - surface height in m asl.
-        # - total precipitation amount in kg/m2
-        # - 2m air temperature in °C
         with utils.ncDataset(get_demo_file('histalp_merged_hef.nc')) as nc_r:
             ref_h = nc_r.variables['hgt'][1, 1]
             ref_t = nc_r.variables['temp'][:, 1, 1]
 
-        # define a temperature anomaly
         temp_anomaly = 0
-
-        # specify temperature gradient
         temp_grad = -0.0065
 
         # the terminus temperature must equal the input temperature
@@ -155,601 +157,215 @@ class TestVAScalingModel(unittest.TestCase):
         """Tests the subroutine which computes solid precipitation amount from
         given total precipitation and temperature.
         """
-
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid
-        gis.define_glacier_region(gdir, entity=entity)
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-
-        # read the following variable from the center pixel (46.83N 10.75E)
-        # of the Hintereisferner HistAlp climate file for the
-        # entire time period from October 1801 until September 2003
-        # - surface height in m asl.
-        # - total precipitation amount in kg/m2
-        # - 2m air temperature in °C
         with utils.ncDataset(get_demo_file('histalp_merged_hef.nc')) as nc_r:
             ref_h = nc_r.variables['hgt'][1, 1]
             ref_p = nc_r.variables['prcp'][:, 1, 1]
             ref_t = nc_r.variables['temp'][:, 1, 1]
 
-        # define needed parameters
-        prcp_factor = 1
         temp_all_solid = 0
         temp_grad = -0.0065
-
-        # define elevation levels
-        ref_hgt = ref_h
         min_hgt = ref_h - 100
         max_hgt = ref_h + 100
 
         # if the terminus temperature is below the threshold for
         # solid precipitation all fallen precipitation must be solid
         temp_terminus = ref_t * 0 + temp_all_solid
-        solid_prcp = vascaling.compute_solid_prcp(ref_p, prcp_factor, ref_hgt,
-                                                  min_hgt, max_hgt,
+        solid_prcp = vascaling.compute_solid_prcp(ref_p, min_hgt, max_hgt,
                                                   temp_terminus,
-                                                  temp_all_solid, temp_grad,
-                                                  prcp_grad=0, prcp_anomaly=0)
+                                                  temp_all_solid, temp_grad)
         np.testing.assert_allclose(solid_prcp, ref_p)
 
         # if the temperature at the maximal elevation is above the threshold
         # for solid precipitation all fallen precipitation must be liquid
         temp_terminus = ref_t + 100
-        solid_prcp = vascaling.compute_solid_prcp(ref_p, prcp_factor, ref_hgt,
-                                                  min_hgt, max_hgt,
+        solid_prcp = vascaling.compute_solid_prcp(ref_p, min_hgt, max_hgt,
                                                   temp_terminus,
-                                                  temp_all_solid, temp_grad,
-                                                  prcp_grad=0, prcp_anomaly=0)
+                                                  temp_all_solid, temp_grad)
         np.testing.assert_allclose(solid_prcp, 0)
 
         # test extreme case if max_hgt equals min_hgt
         test_p = ref_p * (ref_t <= temp_all_solid).astype(int)
-        solid_prcp = vascaling.compute_solid_prcp(ref_p, prcp_factor, ref_hgt,
-                                                  ref_hgt, ref_hgt, ref_t,
-                                                  temp_all_solid, temp_grad,
-                                                  prcp_grad=0, prcp_anomaly=0)
+        solid_prcp = vascaling.compute_solid_prcp(ref_p, ref_h, ref_h, ref_t,
+                                                  temp_all_solid, temp_grad)
         np.testing.assert_allclose(solid_prcp, test_p)
 
     def test_min_max_elevation(self):
         """Test the helper method which computes the minimal and maximal
-        glacier surface elevation in meters asl, from the given DEM and glacier
-        outline.
+        glacier surface elevation.
         """
-
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid and glacier mask
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
-
-        # set targets from RGI
-
-        min_target = 2430.0
-        max_target = 3674.0
-        # get values from method
+        gdir = self._gdir(flowlines=False)
         min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
-        # test with one percentage relative tolerance
-        np.testing.assert_allclose(min_hgt, min_target, rtol=1e-2)
-        np.testing.assert_allclose(max_hgt, max_target, rtol=1e-2)
+        np.testing.assert_allclose(min_hgt, 2430, rtol=1e-2)
+        np.testing.assert_allclose(max_hgt, 3674, rtol=1e-2)
 
-    def test_scaling_constants(self):
-        pass
-
-    def test_yearly_mb_temp_prcp(self):
-        """Test the routine which returns the yearly mass balance relevant
-        climate parameters, i.e. positive melting temperature and solid
-        precipitation. The testing target is the output of the corresponding
-        OGGM routine `get_yearly_mb_climate_on_glacier(gdir)`.
-        """
-
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid and glacier mask
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
-        # run centerline prepro tasks
-        centerlines.compute_centerlines(gdir)
-        centerlines.initialize_flowlines(gdir)
-        centerlines.catchment_area(gdir)
-        centerlines.catchment_intersections(gdir)
-        centerlines.catchment_width_geom(gdir)
-        centerlines.catchment_width_correction(gdir)
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-
-        # get yearly sums of terminus temperature and solid precipitation
-        years, temp, prcp = vascaling.get_yearly_mb_temp_prcp(gdir)
-
-        # use the OGGM methode to get the mass balance
-        # relevant climate parameters
-        years_oggm, temp_oggm, prcp_oggm = \
-            climate.mb_yearly_climate_on_glacier(gdir)
-
-        # the energy input at the glacier terminus must be greater than (or
-        # equal to) the glacier wide average, since the air temperature drops
-        # with elevation, i.e. the mean deviation must be positive, using the
-        # OGGM data as reference
-        assert md(temp_oggm, temp) >= 0
-        # consequentially, the average mass input must be less than (or equal
-        # to) the mass input integrated over the whole glacier surface, i.e.
-        # the mean deviation must be negative, using the OGGM data as reference
-        assert md(prcp_oggm, prcp) <= 0
-
-        # correlation must be higher than set threshold
-        assert corrcoef(temp, temp_oggm) >= 0.93
-        assert corrcoef(prcp, prcp_oggm) >= 0.98
-
-        # get terminus temperature using the OGGM routine
-        fpath = gdir.get_filepath('gridded_data')
-        with ncDataset(fpath) as nc:
-            mask = nc.variables['glacier_mask'][:]
-            topo = nc.variables['topo'][:]
-        heights = np.array([np.min(topo[np.where(mask == 1)])])
-        years_height, temp_height, _ = \
-            climate.mb_yearly_climate_on_height(gdir, heights, flatten=False)
-        temp_height = temp_height[0]
-        # both time series must be equal
-        np.testing.assert_array_equal(temp, temp_height)
-
-        # get solid precipitation averaged over the glacier
-        # (not weighted with widths)
-        fls = gdir.read_pickle('inversion_flowlines')
-        heights = np.array([])
-        for fl in fls:
-            heights = np.append(heights, fl.surface_h)
-        years_height, _, prcp_height = \
-            climate.mb_yearly_climate_on_height(gdir, heights, flatten=True)
-        # correlation must be higher than set threshold
-        assert corrcoef(prcp, prcp_height) >= 0.99
-
-        # TODO: assert absolute values (or differences) of precipitation @ASK
-
-        # test exception handling of out of bounds time/year range
-        with self.assertRaises(climate.MassBalanceCalibrationError):
-            # start year out of bounds
-            year_range = [1500, 1980]
-            _, _, _ = vascaling.get_yearly_mb_temp_prcp(gdir,
-                                                        year_range=year_range)
-        with self.assertRaises(climate.MassBalanceCalibrationError):
-            # end year oud of bounds
-            year_range = [1980, 3000]
-            _, _, _ = vascaling.get_yearly_mb_temp_prcp(gdir,
-                                                        year_range=year_range)
-        with self.assertRaises(ValueError):
-            # get not N full years
-            t0 = datetime.datetime(1980, 1, 1)
-            t1 = datetime.datetime(1980, 3, 1)
-            time_range = [t0, t1]
-            _, _, _ = vascaling.get_yearly_mb_temp_prcp(gdir,
-                                                        time_range=time_range)
-
-        # TODO: assert gradient in climate file?!
-
-        pass
-
-    def test_local_t_star(self):
-
-        # set parameters for climate file and mass balance calibration
-        cfg.PARAMS['baseline_climate'] = 'CUSTOM'
-        cfg.PATHS['climate_file'] = get_demo_file('histalp_merged_hef.nc')
-        cfg.PARAMS['run_mb_calibration'] = False
-
-        # read the Hintereisferner
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid and the glacier mask
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
-        # run centerline prepro tasks
-        centerlines.compute_centerlines(gdir)
-        centerlines.initialize_flowlines(gdir)
-        centerlines.catchment_area(gdir)
-        centerlines.catchment_intersections(gdir)
-        centerlines.catchment_width_geom(gdir)
-        centerlines.catchment_width_correction(gdir)
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-
-        # compute the reference t* for the glacier
-        # given the reference of mass balance measurements
-        res = vascaling.t_star_from_refmb(gdir)
-        t_star, bias = res['t_star'], res['bias']
-        # compute local t* and the corresponding mu*
-        vascaling.local_t_star(gdir, tstar=t_star, bias=bias)
-        # read calibration results
-        vas_mustar_refmb = gdir.read_json('vascaling_mustar')
-
-        # get reference t* list
-        fn = 'vas_ref_tstars_rgi6_histalp.csv'
-        fp = vascaling.get_ref_tstars_filepath(fn)
-        ref_df = pd.read_csv(fp)
-
-        # compute local t* and the corresponding mu*
-        vascaling.local_t_star(gdir, ref_df=ref_df)
-        # read calibration results
-        vas_mustar_refdf = gdir.read_json('vascaling_mustar')
-
-        # compute local t* and the corresponding mu*
-        vascaling.local_t_star(gdir)
-        # read calibration results
-        vas_mustar = gdir.read_json('vascaling_mustar')
-
-        # compare with each other
-        assert vas_mustar_refdf == vas_mustar
-        # TODO: this test is currently failing, since the bias computed
-        # via `t_start_from_refmb` does not align with the reference tstar list
-        # np.testing.assert_allclose(vas_mustar_refmb['bias'],
-        #                            vas_mustar_refdf['bias'], atol=1)
-        vas_mustar_refdf.pop('bias')
-        vas_mustar_refmb.pop('bias')
-        # end of workaround
-        assert vas_mustar_refdf == vas_mustar_refmb
-        # compare with know values
-        assert vas_mustar['t_star'] == 1885
-        assert abs(vas_mustar['mu_star'] - 82.73) <= 0.1
-        assert abs(vas_mustar['bias'] - -6.47) <= 0.1
-
-    def test_ref_t_stars(self):
-        """TODO: write docstring and test"""
-        pass
-
-    # -------------------------
-    # Test mass balance models
-    # -------------------------
-
-    def _setup_mb_test(self):
-        """Avoiding a chunk of code duplicate. Performs needed prepo tasks and
-        returns the oggm.GlacierDirectory.
-        """
-
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid and the glacier mask
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
-
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-
-        # run centerline prepro tasks
-        centerlines.compute_centerlines(gdir)
-        centerlines.initialize_flowlines(gdir)
-        centerlines.catchment_area(gdir)
-        centerlines.catchment_intersections(gdir)
-        centerlines.catchment_width_geom(gdir)
-        centerlines.catchment_width_correction(gdir)
-
-        # read reference glacier mass balance data
-        mbdf = gdir.get_ref_mb_data()
-        # compute the reference t* for the glacier
-        # given the reference of mass balance measurements
-        res = vascaling.t_star_from_refmb(gdir, mbdf=mbdf['ANNUAL_BALANCE'])
-        t_star, bias = res['t_star'], res['bias']
-
-        # compute local t* and the corresponding mu*
-        vascaling.local_t_star(gdir, tstar=t_star, bias=bias)
-
-        # run OGGM mu* calibration
-        climate.local_t_star(gdir, tstar=t_star, bias=bias)
-        climate.mu_star_calibration(gdir)
-
-        # pass the GlacierDirectory
-        return gdir
+    # -- mass balance model
 
     def test_monthly_climate(self):
-        """Test the routine getting the monthly climate against
-        the routine getting annual climate.
-        """
-
-        # run all needed prepro tasks
-        gdir = self._setup_mb_test()
-
-        # instance the mass balance models
+        """The sum over the monthly climate must equal the annual climate."""
+        gdir = self._calibrated_gdir()
         mbmod = vascaling.VAScalingMassBalance(gdir)
 
-        # get relevant glacier surface elevation
-        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
-
-        # get all month of the year in the
-        # floating (hydrological) year convention
         year = 1975
-        months = np.linspace(year, year + 1, num=12, endpoint=False)
+        _, temp_annual, _, prcp_annual = mbmod.get_annual_climate(None,
+                                                                  year=year)
 
-        # create containers
-        temp_month = np.empty(12)
-        prcp_month = np.empty(12)
-        # get mb relevant climate data for every month
-        for i, month in enumerate(months):
-            _temp, _prcp = mbmod.get_monthly_climate(min_hgt, max_hgt, month)
-            temp_month[i] = _temp
-            prcp_month[i] = _prcp
+        temp_months = 0.
+        prcp_months = 0.
+        for month in np.arange(1, 13):
+            yr = utils.date_to_floatyear(year, month)
+            _, t, _, p = mbmod.get_monthly_climate(None, year=yr)
+            temp_months += t
+            prcp_months += p
 
-        # melting temperature and precipitation amount cannot be negative
-        assert temp_month.all() >= 0.
-        assert prcp_month.all() >= 0.
-
-        # get climate data for the whole year
-        temp_year, prcp_year = mbmod.get_annual_climate(min_hgt, max_hgt, year)
-
-        # compare
-        np.testing.assert_array_almost_equal(temp_month, temp_year, decimal=2)
-        np.testing.assert_array_almost_equal(prcp_month, prcp_year, decimal=2)
-
-    def test_annual_climate(self):
-        """Test my routine against the corresponding OGGM routine from
-        the `PastMassBalance()` model.
-        """
-
-        # run all needed prepro tasks
-        gdir = self._setup_mb_test()
-
-        # instance the mass balance models
-        vas_mbmod = vascaling.VAScalingMassBalance(gdir)
-        past_mbmod = massbalance.PastMassBalance(gdir)
-
-        # get relevant glacier surface elevation
-        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
-        heights = np.array([min_hgt, (min_hgt + max_hgt) / 2, max_hgt])
-
-        # specify an (arbitray) year
-        year = 1975
-        # get mass balance relevant climate information
-        temp_for_melt_vas, prcp_solid_vas = \
-            vas_mbmod.get_annual_climate(min_hgt, max_hgt, year)
-        _, temp_for_melt_oggm, _, prcp_solid_oggm = \
-            past_mbmod.get_annual_climate(heights, year)
-
-        # prepare my (monthly) values for comparison
-        temp_for_melt_vas = temp_for_melt_vas.sum()
-        prcp_solid_vas = prcp_solid_vas.sum()
-
-        # computed positive terminus melting temperature must be equal for both
-        # used methods, i.e. temp_VAS == temp_OGGM
-        np.testing.assert_allclose(temp_for_melt_vas,
-                                   temp_for_melt_oggm[0],
-                                   rtol=1e-3)
-
-        # glacier averaged solid precipitation amount must be greater than (or
-        # equal to) solid precipitation amount at glacier terminus elevation
-        assert md(prcp_solid_oggm[0], prcp_solid_vas) >= 0
-        # glacier averaged solid precipitation amount must be comparable to the
-        # solid precipitation amount at average glacier surface elevation
-        assert rel_err(prcp_solid_oggm[1], prcp_solid_vas) <= 0.15
-        # glacier averaged solid precipitation amount must be less than (or
-        # equal to) solid precipitation amount at maximum glacier elevation
-        assert md(prcp_solid_oggm[2], prcp_solid_vas) <= 0
+        np.testing.assert_allclose(temp_annual, temp_months, rtol=1e-6)
+        np.testing.assert_allclose(prcp_annual, prcp_months, rtol=1e-6)
 
     def test_annual_mb(self):
-        """Test the routine computing the annual mass balance."""
-        # run all needed prepro tasks
-        gdir = self._setup_mb_test()
+        """Test the routine computing the annual mass balance against the
+        mass balance equation evaluated by hand.
+        """
+        gdir = self._calibrated_gdir()
+        mbmod = vascaling.VAScalingMassBalance(gdir)
 
-        # get relevant glacier surface elevation
-        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
-
-        # define temporal range
         year = 1975
-        years = np.array([year, year])
-
-        # get mass balance relevant climate data
-        _, temp, prcp = vascaling.get_yearly_mb_temp_prcp(gdir,
-                                                          year_range=years)
-        temp = temp[0]
-        prcp = prcp[0]
-
-        # read mu* and bias from vascaling_mustar
-        vascaling_mustar = gdir.read_json('vascaling_mustar')
-        mu_star = vascaling_mustar['mu_star']
-        bias = vascaling_mustar['bias']
+        _, temp, _, prcp = mbmod.get_annual_climate(None, year=year)
 
         # specify scaling factor for SI units [kg s-1]
         fac_SI = cfg.SEC_IN_YEAR * cfg.PARAMS['ice_density']
 
-        # compute mass balance 'by hand'
-        mb_ref = (prcp - mu_star * temp - bias) / fac_SI
-        # compute mb using the VAS mass balance model
-        mb_mod = vascaling.VAScalingMassBalance(gdir).get_annual_mb(min_hgt,
-                                                                    max_hgt,
-                                                                    year)
-        # compare mass balances with bias
-        np.testing.assert_allclose(mb_ref, mb_mod, rtol=1e-3)
+        # compute mass balance 'by hand' and compare
+        mb_ref = (prcp - mbmod.melt_f * temp) / fac_SI
+        mb_mod = mbmod.get_annual_mb(None, year=year)
+        np.testing.assert_allclose(mb_ref, mb_mod, rtol=1e-6)
 
-        # compute mass balance 'by hand'
-        mb_ref = (prcp - mu_star * temp) / fac_SI
-        # compute mb 'by model'
-        mb_mod = vascaling.VAScalingMassBalance(gdir, bias=0). \
-            get_annual_mb(min_hgt, max_hgt, year)
-        # compare mass balances without bias
-        np.testing.assert_allclose(mb_ref, mb_mod, rtol=1e-3)
-
-    def test_monthly_mb(self):
-        """TODO: write test and docstring"""
-        pass
+        # now with a bias
+        bias = 100.
+        mbmod = vascaling.VAScalingMassBalance(gdir, bias=bias)
+        mb_ref = (prcp - mbmod.melt_f * temp - bias) / fac_SI
+        mb_mod = mbmod.get_annual_mb(None, year=year)
+        np.testing.assert_allclose(mb_ref, mb_mod, rtol=1e-6)
 
     def test_monthly_specific_mb(self):
-        """Test the monthly specific mass balance against the
-        corresponding yearly mass balance.
-        """
-
-        # run all needed prepro tasks
-        gdir = self._setup_mb_test()
-
-        # instance mb models
-        vas_mbmod = vascaling.VAScalingMassBalance(gdir)
-
-        # get relevant glacier surface elevation
-        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
-
-        # get all month of that year in the
-        # floating (hydrological) year convention
-        year = 1803
-        months = np.linspace(year, year + 1, num=12, endpoint=False)
-
-        # compute monthly specific mass balance for
-        # all month of given year and store in array
-        spec_mb_month = np.empty(months.size)
-        for i, month in enumerate(months):
-            spec_mb_month[i] = vas_mbmod.get_monthly_specific_mb(min_hgt,
-                                                                 max_hgt,
-                                                                 month)
-
-        # compute yearly specific mass balance
-        spec_mb_year = vas_mbmod.get_specific_mb(min_hgt, max_hgt, year)
-
-        # compare
-        np.testing.assert_allclose(spec_mb_month.sum(), spec_mb_year,
-                                   rtol=1e-3)
-
-    def test_specific_mb(self):
-        """Compare the specific mass balance to the one computed
-        using the OGGM function of the PastMassBalance model.
-        """
-
-        # run all needed prepro tasks
-        gdir = self._setup_mb_test()
-
-        # instance mb models
-        vas_mbmod = vascaling.VAScalingMassBalance(gdir)
-        past_mbmod = massbalance.PastMassBalance(gdir)
-
-        # get relevant glacier surface elevation
-        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
-
-        # define temporal range
-        ys = 1802
-        ye = 2003
-        years = np.arange(ys, ye + 1)
-
-        # get flow lines
-        fls = gdir.read_pickle('inversion_flowlines')
-
-        # create empty container
-        past_mb = np.empty(years.size)
-        vas_mb = np.empty(years.size)
-        # get specific mass balance for all years
-        for i, year in enumerate(years):
-            past_mb[i] = past_mbmod.get_specific_mb(fls=fls, year=year)
-            vas_mb[i] = vas_mbmod.get_specific_mb(min_hgt, max_hgt, year)
-
-        # compute and check correlation
-        assert corrcoef(past_mb, vas_mb) >= 0.94
-
-        # relative error of average spec mb
-        assert np.abs(rel_err(past_mb.mean(), vas_mb.mean())) <= 0.38
-
-        # check correlation of positive and negative mb years
-        assert corrcoef(np.sign(past_mb), np.sign(vas_mb)) >= 0.72
-
-        # compare to reference mb measurements
-        mbs = gdir.get_ref_mb_data()['ANNUAL_BALANCE']
-        assert corrcoef(vas_mb[np.in1d(years, mbs.index)], mbs) >= 0.79
-
-    # -------------------
-    # Test scaling model
-    # -------------------
-
-    def _set_up_VAS_model(self):
-        """Avoiding a chunk of code duplicate. Set's up a running volume/area
-        scaling model, including all needed prepo tasks.
-        """
-
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid and glacier mask
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
-
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-
-        # run center line preprocessing tasks
-        centerlines.compute_centerlines(gdir)
-        centerlines.initialize_flowlines(gdir)
-        centerlines.catchment_area(gdir)
-        centerlines.catchment_intersections(gdir)
-        centerlines.catchment_width_geom(gdir)
-        centerlines.catchment_width_correction(gdir)
-
-        # read reference glacier mass balance data
-        mbdf = gdir.get_ref_mb_data()
-        # compute the reference t* for the glacier
-        # given the reference of mass balance measurements
-        res = climate.t_star_from_refmb(gdir, mbdf=mbdf['ANNUAL_BALANCE'])
-        t_star, bias = res['t_star'], res['bias']
-
-        # --------------------
-        #  MASS BALANCE TASKS
-        # --------------------
-
-        # compute local t* and the corresponding mu*
-        vascaling.local_t_star(gdir, tstar=t_star, bias=bias)
-
-        # instance the mass balance models
+        """The monthly specific mass balances must sum up to the annual one."""
+        gdir = self._calibrated_gdir()
         mbmod = vascaling.VAScalingMassBalance(gdir)
 
-        # ----------------
-        #  DYNAMICAL PART
-        # ----------------
-        # get reference area
-        a0 = gdir.rgi_area_m2
-        # get reference year
-        y0 = gdir.get_climate_info()['baseline_hydro_yr_0']
-        # get min and max glacier surface elevation
-        h0, h1 = vascaling.get_min_max_elevation(gdir)
+        year = 1975
+        mb_annual = mbmod.get_specific_mb(year=year)
+        months = [utils.date_to_floatyear(year, m) for m in np.arange(1, 13)]
+        mb_monthly = mbmod.get_specific_mb(year=months,
+                                           time_resolution='monthly')
+        np.testing.assert_allclose(mb_annual, np.sum(mb_monthly), rtol=1e-6)
 
-        model = vascaling.VAScalingModel(year_0=y0, area_m2_0=a0,
-                                         min_hgt=h0, max_hgt=h1,
-                                         mb_model=mbmod)
-        return gdir, model
+    def test_specific_mb_vs_oggm(self):
+        """The VAS and the OGGM mass balance model must tell a similar story
+        when calibrated on the same reference mass balance.
+        """
+        gdir = self._calibrated_gdir()
+        years = np.arange(*REF_MB_YEARS)
+        mb_vas = vascaling.VAScalingMassBalance(gdir).get_specific_mb(
+            year=years)
+
+        # now calibrate OGGM's own model on the same value
+        massbalance.mb_calibration_from_scalar_mb(
+            gdir, ref_mb=REF_MB, ref_mb_years=REF_MB_YEARS,
+            calibrate_param1='melt_f', calibrate_param2='prcp_fac',
+            calibrate_param3='temp_bias', overwrite_gdir=True,
+            overwrite_observations=True)
+        fls = gdir.read_pickle('inversion_flowlines')
+        mb_oggm = massbalance.MonthlyTIModel(gdir).get_specific_mb(
+            fls=fls, year=years)
+
+        # both must reproduce the reference mass balance
+        np.testing.assert_allclose(mb_vas.mean(), REF_MB, atol=1e-3)
+        np.testing.assert_allclose(mb_oggm.mean(), REF_MB, atol=1e-3)
+        # and the interannual variability must agree
+        assert corrcoef(mb_vas, mb_oggm) >= 0.9
+
+    # -- calibration
+
+    def test_mb_calibration(self):
+        """The VAS mass balance model must plug into OGGM's calibration."""
+        gdir = self._gdir()
+
+        df = massbalance.mb_calibration_from_scalar_mb(
+            gdir, ref_mb=REF_MB, ref_mb_years=REF_MB_YEARS,
+            mb_model_class=vascaling.VAScalingMassBalance,
+            calibrate_param1='melt_f', calibrate_param2='prcp_fac',
+            calibrate_param3='temp_bias', overwrite_gdir=True,
+            overwrite_observations=True)
+
+        # the calibrated parameters are written to the glacier settings
+        for key in ['melt_f', 'prcp_fac', 'temp_bias']:
+            assert gdir.settings[key] == df[key]
+        assert cfg.PARAMS['melt_f_min'] < df['melt_f'] < cfg.PARAMS['melt_f_max']
+        assert df['bias'] == 0
+
+        # and the calibrated model reproduces the reference mass balance
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+        mb = mbmod.get_specific_mb(year=np.arange(*REF_MB_YEARS))
+        np.testing.assert_allclose(mb.mean(), REF_MB, atol=1e-3)
+
+    def test_mb_calibration_geodetic_wrapper(self):
+        """Our wrapper must give the same answer as OGGM's task."""
+        gdir = self._calibrated_gdir()
+        expected = {k: gdir.settings[k]
+                    for k in ['melt_f', 'prcp_fac', 'temp_bias']}
+
+        df = vascaling.mb_calibration_from_geodetic_mb(
+            gdir, use_observations_file=True, overwrite_gdir=True)
+        for key, value in expected.items():
+            np.testing.assert_allclose(df[key], value)
+
+    def test_multiple_flowlines_refused(self):
+        """The VAS model describes the glacier as a whole."""
+        gdir = self._calibrated_gdir()
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+        fls = gdir.read_pickle('inversion_flowlines')
+        with pytest.raises(oggm.exceptions.InvalidWorkflowError):
+            mbmod.get_specific_mb(fls=fls * 2, year=1975)
+
+    def test_prcp_clim(self):
+        """The turnover must be the mean solid precipitation over the whole
+        climate record, and must not depend on the terminus position.
+        """
+        gdir = self._calibrated_gdir()
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+
+        years = np.unique(mbmod.years)
+        prcp_sol = np.array([mbmod.get_annual_climate(None, year=y)[3].sum()
+                             for y in years])
+        np.testing.assert_allclose(mbmod.prcp_clim, prcp_sol.mean() * 1e-3)
+
+        # the turnover is a climatology at the RGI date geometry
+        mbmod.min_hgt = mbmod.min_hgt_0 + 300
+        np.testing.assert_allclose(mbmod.prcp_clim, prcp_sol.mean() * 1e-3)
+
+        # it must not depend on anything the calibration writes, otherwise
+        # a glacier evolves differently during and after a calibration
+        sub = vascaling.VAScalingMassBalance(
+            gdir, prcp_clim_period='1953-01-01_2003-01-01')
+        assert sub.prcp_clim != mbmod.prcp_clim
+
+    # -- dynamical model
 
     def test_time_scales(self):
         """Test the internal method which computes the glaciers time scales
         for length change and area change.
         """
-
-        # get glacier directory and set up VAS model
-        _, model = self._set_up_VAS_model()
-        # compute time scales
+        _, model = self._vas_model()
         model._compute_time_scales()
-        # compare to given values
-        np.testing.assert_allclose(model.tau_l, 38., atol=1)
-        np.testing.assert_allclose(model.tau_a, 12., atol=1)
+        # the response times moved when prcp_clim stopped being defined
+        # around t*, but they must stay in the same ballpark
+        assert 20 < model.tau_l < 60
+        assert 5 < model.tau_a < 25
+        assert model.tau_l > model.tau_a
 
     def test_reset(self):
         """Test the method which sets the model back to its initial state."""
-
-        # get glacier directory and set up VAS model
-        _, model = self._set_up_VAS_model()
-        # run for some number of years
-        n_years = 10
-        model.run_until(model.year + n_years)
-        # reset the model
+        _, model = self._vas_model()
+        model.run_until(model.year + 10)
         model.reset()
-        # check if initial values are restored
         assert model.year == model.year_0
         assert model.length_m == model.length_m_0
         assert model.area_m2 == model.area_m2_0
@@ -758,404 +374,235 @@ class TestVAScalingModel(unittest.TestCase):
 
     def test_step(self):
         """Test the advance of the model glacier after one time step."""
-
-        # get glacier directory and set up VAS model
-        _, model = self._set_up_VAS_model()
-        # copy initial state of the model
+        _, model = self._vas_model()
         m0 = copy.deepcopy(model)
-        # advance model glacier by one year
         model.step()
-        # compare initial to advanced model state
         dV = m0.spec_mb * m0.area_m2 / m0.rho
         np.testing.assert_allclose(model.volume_m3 - m0.volume_m3, dV)
 
+    def test_ice_cap(self):
+        """Ice caps use their own scaling parameters, and must keep them
+        through `create_start_glacier`.
+        """
+        gdir, model = self._vas_model()
+        cap = vascaling.VAScalingModel(
+            year_0=model.year_0, area_m2_0=model.area_m2_0,
+            min_hgt=model.min_hgt_0, max_hgt=model.max_hgt,
+            mb_model=model.mb_model, glacier_type='Ice cap')
+        assert cap.gamma == cfg.PARAMS['vas_gamma_icecap_area']
+        cap.create_start_glacier(model.area_m2_0 / 2, year_start=model.year_0)
+        assert cap.glacier_type == 'Ice cap'
+        assert cap.gamma == cfg.PARAMS['vas_gamma_icecap_area']
+
+        with pytest.raises(oggm.exceptions.InvalidParamsError):
+            vascaling.VAScalingModel(
+                year_0=model.year_0, area_m2_0=model.area_m2_0,
+                min_hgt=model.min_hgt_0, max_hgt=model.max_hgt,
+                mb_model=model.mb_model, glacier_type='Snowball')
+
     def test_run_until_and_store(self):
-        """Test the volume/area scaling model against the oggm.FluxBasedModel.
-
-        Both models run the Hintereisferner over the entire HistAlp climate
-        period, initialized with the 2003 RGI outline without spin up.
-
-        The following two parameters for length, area and volume are tested:
-            - correlation coefficient
-            - relative RMSE, i.e. RMSE/mean(OGGM). Whereby the results from the
-                VAS model are offset with the average differences to the OGGM
-                results.
-       """
-
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid and glacier mask
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
-
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-
-        # run center line preprocessing tasks
-        centerlines.compute_centerlines(gdir)
-        centerlines.initialize_flowlines(gdir)
-        centerlines.compute_downstream_line(gdir)
-        centerlines.compute_downstream_bedshape(gdir)
-        centerlines.catchment_area(gdir)
-        centerlines.catchment_intersections(gdir)
-        centerlines.catchment_width_geom(gdir)
-        centerlines.catchment_width_correction(gdir)
-
-        # read reference glacier mass balance data
-        mbdf = gdir.get_ref_mb_data()
-        # compute the reference t* for the glacier
-        # given the reference of mass balance measurements
-        res = climate.t_star_from_refmb(gdir, mbdf=mbdf['ANNUAL_BALANCE'])
-        t_star, bias = res['t_star'], res['bias']
-
-        # --------------------
-        #  SCALING MODEL
-        # --------------------
-
-        # compute local t* and the corresponding mu*
-        vascaling.local_t_star(gdir, tstar=t_star, bias=bias)
-
-        # instance the mass balance models
-        vas_mbmod = vascaling.VAScalingMassBalance(gdir)
-
-        # get reference area
-        a0 = gdir.rgi_area_m2
-        # get reference year
-        y0 = gdir.get_climate_info()['baseline_hydro_yr_0']
-        # get min and max glacier surface elevation
-        h0, h1 = vascaling.get_min_max_elevation(gdir)
-
-        vas_model = vascaling.VAScalingModel(year_0=y0, area_m2_0=a0,
-                                             min_hgt=h0, max_hgt=h1,
-                                             mb_model=vas_mbmod)
-
-        # let model run over entire HistAlp climate period
-        vas_ds = vas_model.run_until_and_store(2003)
-
-        # ------
-        #  OGGM
-        # ------
-
-        # compute local t* and the corresponding mu*
-        climate.local_t_star(gdir, tstar=t_star, bias=bias)
-        climate.mu_star_calibration(gdir)
-
-        # instance the mass balance models
-        mb_mod = massbalance.PastMassBalance(gdir)
-
-        # perform ice thickness inversion
-        inversion.prepare_for_inversion(gdir)
-        inversion.mass_conservation_inversion(gdir)
-        inversion.filter_inversion_output(gdir)
-
-        # initialize present time glacier
-        flowline.init_present_time_glacier(gdir)
-
-        # instance flowline model
-        fls = gdir.read_pickle('model_flowlines')
-        y0 = gdir.get_climate_info()['baseline_hydro_yr_0']
-        fl_mod = flowline.FluxBasedModel(flowlines=fls, mb_model=mb_mod, y0=y0)
-
-        # run model and store output as xarray data set
-        _, oggm_ds = fl_mod.run_until_and_store(2003)
-
-        # temporal indices must be equal
-        assert (vas_ds.time == oggm_ds.time).all()
-
-        # specify which parameters to compare and their respective correlation
-        # coefficients and rmsd values
-        params = ['length_m', 'area_m2', 'volume_m3']
-        corr_coeffs = np.array([0.7, 0.7, 0.7])
-        rmsds = np.array([0.43e3, 0.25e6, 0.05e9])
-
-        # compare given parameters
-        for param, cc, rmsd in zip(params, corr_coeffs, rmsds):
-            # correlation coefficient
-            assert corrcoef(oggm_ds[param].values, vas_ds[param].values) >= cc
-            # root mean squared deviation
-            rmsd_an = rmsd_bc(oggm_ds[param].values, vas_ds[param].values)
-            assert rmsd_an <= rmsd
-
-    def test_run_random_climate(self):
-        """ Test the run_random_climate task for a climate based on the
-        equilibrium period centred around t*. Additionally a positive and a
-        negative temperature bias are tested.
-
-        Returns
-        -------
-
+        """The stored diagnostics must match the model state, and be readable
+        by OGGM's `compile_run_output`.
         """
-        # let's not use the mass balance bias since we want to reproduce
-        # results from mass balance calibration
-        cfg.PARAMS['use_bias_for_run'] = False
+        gdir, model = self._vas_model(y0=1950)
+        diag_path = gdir.get_filepath('model_diagnostics')
+        vas_diag_path = gdir.get_filepath('vas_diagnostics')
+        ds = model.run_until_and_store(2000, diag_path=diag_path,
+                                       vas_diag_path=vas_diag_path)
 
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
+        # calendar years, as OGGM does it
+        np.testing.assert_array_equal(ds.time, np.arange(1950, 2001))
+        np.testing.assert_array_equal(ds.calendar_year, np.arange(1950, 2001))
+        # the last entry must be the current model state
+        np.testing.assert_allclose(ds.volume_m3[-1], model.volume_m3)
+        np.testing.assert_allclose(ds.area_m2[-1], model.area_m2)
+        np.testing.assert_allclose(ds.length_m[-1], model.length_m)
+        np.testing.assert_allclose(ds.min_hgt[-1], model.min_hgt)
 
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid and glacier mask
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
+        # the OGGM compatible file holds the geometry only
+        out = utils.compile_run_output([gdir], path=False)
+        np.testing.assert_allclose(out.volume.values.flatten(),
+                                   ds.volume_m3.values)
+        np.testing.assert_allclose(out.area.values.flatten(),
+                                   ds.area_m2.values)
 
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-        # compute mass balance parameters
-        fn = 'vas_ref_tstars_rgi6_histalp.csv'
-        fp = vascaling.get_ref_tstars_filepath(fn)
-        ref_df = pd.read_csv(fp)
-        vascaling.local_t_star(gdir, ref_df=ref_df)
-
-        # define some parameters for the random climate model
-        nyears = 300
-        seed = 1
-        temp_bias = 0.5
-        # read the equilibirum year used for the mass balance calibration
-        t_star = gdir.read_json('vascaling_mustar')['t_star']
-        # run model with random climate
-        _ = vascaling.run_random_climate(gdir, nyears=nyears, y0=t_star,
-                                         seed=seed)
-        # run model with positive temperature bias
-        _ = vascaling.run_random_climate(gdir, nyears=nyears, y0=t_star,
-                                         seed=seed, temperature_bias=temp_bias,
-                                         output_filesuffix='_bias_p')
-        # run model with negative temperature bias
-        _ = vascaling.run_random_climate(gdir, nyears=nyears, y0=t_star,
-                                         seed=seed,
-                                         temperature_bias=-temp_bias,
-                                         output_filesuffix='_bias_n')
-
-        # compile run outputs
-        ds = utils.compile_run_output([gdir], input_filesuffix='')
-        ds_p = utils.compile_run_output([gdir], input_filesuffix='_bias_p')
-        ds_n = utils.compile_run_output([gdir], input_filesuffix='_bias_n')
-
-        # the glacier should not change much under a random climate
-        # based on the equilibirum period centered around t*
-        assert abs(1 - ds.volume.mean() / ds.volume[0]) < 0.015
-        # higher temperatures should result in a smaller glacier
-        assert ds.volume.mean() > ds_p.volume.mean()
-        # lower temperatures should result in a larger glacier
-        assert ds.volume.mean() < ds_n.volume.mean()
-
-    def test_run_constant_climate(self):
-        """ Test the run_constant_climate task for a climate based on the
-        equilibrium period centred around t*. Additionally a positive and a
-        negative temperature bias are tested.
-
-        """
-        # let's not use the mass balance bias since we want to reproduce
-        # results from mass balance calibration
-        cfg.PARAMS['use_bias_for_run'] = False
-
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid and glacier mask
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
-
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-        # compute mass balance parameters
-        fn = 'vas_ref_tstars_rgi6_histalp.csv'
-        fp = vascaling.get_ref_tstars_filepath(fn)
-        ref_df = pd.read_csv(fp)
-        vascaling.local_t_star(gdir, ref_df=ref_df)
-
-        # define some parameters for the constant climate model
-        nyears = 500
-        temp_bias = 0.5
-        _ = vascaling.run_constant_climate(gdir, nyears=nyears,
-                                           output_filesuffix='')
-        _ = vascaling.run_constant_climate(gdir, nyears=nyears,
-                                           temperature_bias=+temp_bias,
-                                           output_filesuffix='_bias_p')
-        _ = vascaling.run_constant_climate(gdir, nyears=nyears,
-                                           temperature_bias=-temp_bias,
-                                           output_filesuffix='_bias_n')
-
-        # compile run outputs
-        ds = utils.compile_run_output([gdir], input_filesuffix='')
-        ds_p = utils.compile_run_output([gdir], input_filesuffix='_bias_p')
-        ds_n = utils.compile_run_output([gdir], input_filesuffix='_bias_n')
-
-        # the glacier should not change under a constant climate
-        # based on the equilibirum period centered around t*
-        assert abs(1 - ds.volume.mean() / ds.volume[0]) < 1e-7
-        # higher temperatures should result in a smaller glacier
-        assert ds.volume.mean() > ds_p.volume.mean()
-        # lower temperatures should result in a larger glacier
-        assert ds.volume.mean() < ds_n.volume.mean()
-
-        # compute volume change from one year to the next
-        dV_p = (ds_p.volume[1:].values - ds_p.volume[:-1].values).flatten()
-        dV_n = (ds_n.volume[1:].values - ds_n.volume[:-1].values).flatten()
-        # compute relative volume change, with respect to the final volume
-        rate_p = abs(dV_p / float(ds_p.volume.values[-1]))
-        rate_n = abs(dV_n / float(ds_n.volume.values[-1]))
-        # the glacier should be in a new equilibirum for last 300 years
-        assert max(rate_p[-300:]) < 0.001
-        assert max(rate_n[-300:]) < 0.001
-
-    def test_run_until_equilibrium(self):
-        """
-        Note: the oscillating behavior makes this test almost meaningless
-        Returns
-        -------
-
-        """
-        # let's not use the mass balance bias since we want to reproduce
-        # results from mass balance calibration
-        cfg.PARAMS['use_bias_for_run'] = False
-
-        # read the Hintereisferner DEM
-        hef_file = get_demo_file('Hintereisferner_RGI6.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-
-        # initialize the GlacierDirectory
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        # define the local grid and glacier mask
-        gis.define_glacier_region(gdir, entity=entity)
-        gis.glacier_masks(gdir)
-
-        # process the given climate file
-        climate.process_custom_climate_data(gdir)
-        # compute mass balance parameters
-        fn = 'vas_ref_tstars_rgi6_histalp.csv'
-        fp = vascaling.get_ref_tstars_filepath(fn)
-        ref_df = pd.read_csv(fp)
-        vascaling.local_t_star(gdir, ref_df=ref_df)
-
-        # instance a constant mass balance model, centred around t*
-        mb_model = vascaling.ConstantVASMassBalance(gdir)
-        # add a positive temperature bias
-        mb_model.temp_bias = 0.5
-
-        # create a VAS model: start with year 0  since we are using a constant
-        # massbalance model, other values are read from RGI
-        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
-        model = vascaling.VAScalingModel(year_0=0, area_m2_0=gdir.rgi_area_m2,
-                                         min_hgt=min_hgt, max_hgt=max_hgt,
-                                         mb_model=mb_model)
-
-        # run glacier with new mass balance model
-        model.run_until_equilibrium(rate=1e-5)
-
-        # equilibrium should be reached after a couple of 100 years
-        assert model.year <= 600
-        # new equilibrium glacier should be smaller (positive temperature bias)
+    def test_run_from_climate_data(self):
+        """The entity task must run and write both diagnostics files."""
+        gdir = self._calibrated_gdir()
+        model = vascaling.run_from_climate_data(gdir, ys=1950, ye=2000)
+        assert gdir.has_file('model_diagnostics')
+        assert gdir.has_file('vas_diagnostics')
+        assert model.year == 2000
+        # Hintereisferner lost mass over this period
         assert model.volume_m3 < model.volume_m3_0
 
-        # run glacier for another 100 years and check volume again
-        v_eq = model.volume_m3
-        model.run_until(model.year + 100)
-        assert abs(1 - (model.volume_m3 / v_eq)) < 0.01
-
-        # instance a random mass balance model, centred around t*
-        mb_model = vascaling.RandomVASMassBalance(gdir)
-        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
-        model = vascaling.VAScalingModel(year_0=0, area_m2_0=gdir.rgi_area_m2,
-                                         min_hgt=min_hgt, max_hgt=max_hgt,
-                                         mb_model=mb_model)
-
-        # run glacier with random mass balance model
-        with self.assertRaises(TypeError):
-            model.run_until_equilibrium(rate=1e-4)
-
-    def test_match_regional_geodetic_mb(self):
-        """TODO: write tests and docstring"""
-        pass
-
-    def test_geodetic_mb_calibration(self):
-        """ TODO:
-
-        Returns
-        -------
-
+    def test_run_random_climate(self):
+        """A random climate run around a year with a balanced mass budget
+        must keep the glacier roughly in place.
         """
+        gdir = self._calibrated_gdir()
+        # find a year around which the glacier is close to equilibrium
+        _, model = self._vas_model(gdir=gdir)
+        model.mb_model.min_hgt = model.min_hgt_0
 
-        # create glacier entity and perform needed prepro tasks
-        hef_file = get_demo_file('Hintereisferner_RGI5.shp')
-        entity = gpd.read_file(hef_file).iloc[0]
-        gdir = oggm.GlacierDirectory(entity, base_dir=self.testdir)
-        gis.define_glacier_region(gdir)
-        gis.simple_glacier_masks(gdir)
-        climate.process_custom_climate_data(gdir)
+        vascaling.run_random_climate(gdir, nyears=300, y0=1930, seed=1,
+                                     halfsize=15, output_filesuffix='_rdn')
+        with xr.open_dataset(gdir.get_filepath('vas_diagnostics',
+                                               filesuffix='_rdn')) as ds:
+            ds = ds.load()
+        # the volume must stay finite and positive, and vary
+        assert np.all(np.isfinite(ds.volume_m3))
+        assert ds.volume_m3.min() > 0
+        assert ds.volume_m3.std() > 0
 
-        # perform the "old" mass balance calibration via local_t_star
-        mbdf = gdir.get_ref_mb_data()
-        res = vascaling.t_star_from_refmb(gdir, mbdf=mbdf['ANNUAL_BALANCE'])
-        t_star, bias = res['t_star'], res['bias']
-        vascaling.local_t_star(gdir, tstar=t_star, bias=bias)
+        # a colder climate must give a bigger glacier, a warmer one a smaller
+        vascaling.run_random_climate(gdir, nyears=300, y0=1930, seed=1,
+                                     halfsize=15, temperature_bias=-0.5,
+                                     output_filesuffix='_cold')
+        vascaling.run_random_climate(gdir, nyears=300, y0=1930, seed=1,
+                                     halfsize=15, temperature_bias=+0.5,
+                                     output_filesuffix='_warm')
+        with xr.open_dataset(gdir.get_filepath('vas_diagnostics',
+                                               filesuffix='_cold')) as dsc:
+            v_cold = float(dsc.volume_m3[-1])
+        with xr.open_dataset(gdir.get_filepath('vas_diagnostics',
+                                               filesuffix='_warm')) as dsw:
+            v_warm = float(dsw.volume_m3[-1])
+        assert v_cold > float(ds.volume_m3[-1]) > v_warm
 
-        # define a mass balance model with the obtained parameters
-        mb_old = vascaling.VAScalingMassBalance(gdir)
+    def test_run_constant_climate(self):
+        """A constant climate run must converge towards an equilibrium."""
+        gdir = self._calibrated_gdir()
+        vascaling.run_constant_climate(gdir, nyears=600, y0=1930,
+                                       halfsize=15, output_filesuffix='_cst')
+        with xr.open_dataset(gdir.get_filepath('vas_diagnostics',
+                                               filesuffix='_cst')) as ds:
+            ds = ds.load()
+        # the specific mass balance must approach zero
+        assert abs(float(ds.spec_mb[-1])) < 10
+        # and the volume must stop changing
+        v = ds.volume_m3.values
+        rate = abs(v[-1] - v[-50]) / v[-1]
+        assert rate < 1e-3
 
-        # set upper limit for mu star
-        cfg.PARAMS['max_mu_star'] = 600
-        # calibrate mass balance parameters from geodetic observations
-        ref_mb = mbdf.ANNUAL_BALANCE.mean()
-        vascaling.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
-                                                       ref_period='1953-01-01_2004-01-01')
-        # define a mass balance model with the obtained parameters
-        mb_new = vascaling.VAScalingMassBalance(gdir)
-
+    def test_run_until_equilibrium(self):
+        """Test the equilibrium search."""
+        gdir = self._calibrated_gdir()
+        mbmod = vascaling.ConstantVASMassBalance(gdir, y0=1930, halfsize=15)
         min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
-        mbdf['old_mb'] = mb_old.get_specific_mb(min_hgt, max_hgt,
-                                                year=mbdf.index)
-        mbdf['new_mb'] = mb_new.get_specific_mb(min_hgt, max_hgt,
-                                                year=mbdf.index)
+        model = vascaling.VAScalingModel(year_0=0,
+                                         area_m2_0=gdir.rgi_area_m2,
+                                         min_hgt=min_hgt, max_hgt=max_hgt,
+                                         mb_model=mbmod,
+                                         glacier_type=gdir.glacier_type)
+        model.run_until_equilibrium(rate=1e-4)
+        assert abs(model.spec_mb) < 10
 
-        # Check that results are all the same
-        np.testing.assert_allclose(ref_mb, mbdf['old_mb'].mean())
-        np.testing.assert_allclose(ref_mb, mbdf['new_mb'].mean())
-        np.testing.assert_allclose(1, mbdf.corr()['new_mb']['old_mb'],
-                                   atol=0.01)
+        # it only works with a constant climate
+        _, model = self._vas_model(gdir=gdir)
+        with pytest.raises(TypeError):
+            model.run_until_equilibrium()
 
-        # Check that model parameters
-        np.testing.assert_allclose(mb_old.mu_star, mb_new.mu_star, atol=2)
-        np.testing.assert_allclose(mb_new.bias, 0)
+    def test_find_start_area(self):
+        """The start area must actually reproduce the RGI area."""
+        gdir = self._calibrated_gdir()
+        area_start = vascaling.find_start_area(gdir, year_start=1851)
 
-        # OK now check what happens with unrealistic climate input
-        # Very positive
-        ref_mb = 2000
-        vascaling.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
-                                                       min_mu_star=5,
-                                                       max_mu_star=500,
-                                                       ref_period='1953-01-01_2004-01-01')
-        mb_new = vascaling.VAScalingMassBalance(gdir)
-        mbdf['new_mb'] = mb_new.get_specific_mb(min_hgt, max_hgt,
-                                                year=mbdf.index)
-        np.testing.assert_allclose(ref_mb, mbdf['new_mb'].mean())
-        fpath = gdir.get_filepath('climate_historical')
-        with utils.ncDataset(fpath, 'r') as nc:
-            assert nc.ref_hgt < nc.uncorrected_ref_hgt
-            assert (gdir.get_diagnostics()['ref_hgt_calib_diff'] ==
-                    nc.ref_hgt - nc.uncorrected_ref_hgt)
-        assert 5 < mb_new.mu_star < 500
+        # re-run from that area and check we land on the RGI area
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+        target_yr = vascaling.core._target_year(gdir, mbmod, None)
+        model_ref = vascaling.core._reference_model(gdir, mbmod, target_yr)
+        model = vascaling.core._start_model(model_ref, area_start, 1851)
+        model.run_until(target_yr)
+        np.testing.assert_allclose(model.area_m2, gdir.rgi_area_m2, rtol=1e-4)
 
-        # Very negative
-        ref_mb = -15000
-        vascaling.mu_star_calibration_from_geodetic_mb(gdir, ref_mb=ref_mb,
-                                                       min_mu_star=5,
-                                                       max_mu_star=500,
-                                                       ref_period='1953-01-01_2004-01-01')
-        mb_new = vascaling.VAScalingMassBalance(gdir)
-        mbdf['new_mb'] = mb_new.get_specific_mb(min_hgt, max_hgt,
-                                                year=mbdf.index)
-        np.testing.assert_allclose(ref_mb, mbdf['new_mb'].mean())
-        fpath = gdir.get_filepath('climate_historical')
-        with utils.ncDataset(fpath, 'r') as nc:
-            assert nc.ref_hgt > nc.uncorrected_ref_hgt
-            assert (gdir.get_diagnostics()['ref_hgt_calib_diff'] ==
-                    nc.ref_hgt - nc.uncorrected_ref_hgt)
-        assert 5 < mb_new.mu_star < 500
+    def test_find_start_area_raises_instead_of_hitting_the_bound(self):
+        """A start area that cannot be reached must raise, not be returned.
+
+        `minimize_scalar(method='bounded')` converges onto its own bound and
+        reports success, which used to hand back a silent non-match.
+        """
+        gdir = self._calibrated_gdir()
+        with pytest.raises(RuntimeError) as err:
+            vascaling.find_start_area(gdir, year_start=1851,
+                                      max_area_factor=1.0)
+        assert 'reproduces' in str(err.value)
+
+    def test_run_reconstruction(self):
+        """The reconstruction must pass through the observed area."""
+        gdir = self._calibrated_gdir()
+        model = vascaling.run_reconstruction(gdir, ys=1950,
+                                             output_filesuffix='_rec')
+
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+        target_yr = vascaling.core._target_year(gdir, mbmod, None)
+        with xr.open_dataset(gdir.get_filepath('vas_diagnostics',
+                                               filesuffix='_rec')) as ds:
+            ds = ds.load()
+
+        # the run goes from the requested start to the end of the record
+        assert int(ds.time[0]) == 1950
+        assert int(ds.time[-1]) == int(mbmod.ye) + 1
+        # and the RGI area is matched at the inventory date
+        np.testing.assert_allclose(float(ds.area_m2.sel(time=target_yr)),
+                                   gdir.rgi_area_m2, rtol=1e-4)
+        # which `run_from_climate_data` would not do from the same start year
+        naive = vascaling.run_from_climate_data(gdir, ys=1950,
+                                                ye=target_yr,
+                                                output_filesuffix='_naive')
+        assert (abs(naive.area_m2 - gdir.rgi_area_m2) >
+                abs(float(ds.area_m2.sel(time=target_yr)) - gdir.rgi_area_m2))
+        assert model.year == int(mbmod.ye) + 1
+
+    def test_mb_calibration_dynamic(self):
+        """The dynamic calibration must match the mass change of the
+        *evolving* glacier, not of the fixed RGI geometry.
+        """
+        gdir = self._gdir()
+        period = '1953-01-01_2003-01-01'
+        # a 1950 start keeps the terminus inside the DEM range, see the
+        # note on the terminus elevation parameterisation in the docstring
+        df = vascaling.mb_calibration_dynamic_from_geodetic_mb(
+            gdir, ref_mb=REF_MB, ref_mb_period=period, prcp_fac=2.5,
+            ys=1950, overwrite_gdir=True)
+
+        assert cfg.PARAMS['melt_f_min'] <= df['melt_f'] <= cfg.PARAMS['melt_f_max']
+        assert df['vas_dynamic_calibration'] is True
+        # it must have matched the observation
+        np.testing.assert_allclose(df['vas_dmdtda_mismatch'], 0, atol=1.)
+
+        # and the reconstruction must reproduce that mass change
+        model = vascaling.run_reconstruction(gdir, ys=1950,
+                                             output_filesuffix='_dyn')
+        with xr.open_dataset(gdir.get_filepath('vas_diagnostics',
+                                               filesuffix='_dyn')) as ds:
+            ds = ds.load()
+        dmdtda = ((float(ds.volume_m3.sel(time=2003)) -
+                   float(ds.volume_m3.sel(time=1953))) *
+                  cfg.PARAMS['ice_density'] / gdir.rgi_area_m2 / 50)
+        np.testing.assert_allclose(dmdtda, REF_MB, atol=1.)
+
+    def test_fixed_geometry_mass_balance(self):
+        """The fixed geometry series must match the mass balance model."""
+        gdir = self._calibrated_gdir()
+        odf = vascaling.fixed_geometry_mass_balance(gdir, ys=1950, ye=2000)
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+        ref = mbmod.get_specific_mb(year=np.arange(1950, 2001))
+        np.testing.assert_allclose(odf.values, ref)
+
+    def test_file_model(self):
+        """The FileModel must reproduce the stored run."""
+        gdir = self._calibrated_gdir()
+        vascaling.run_from_climate_data(gdir, ys=1950, ye=2000,
+                                        output_filesuffix='_hist')
+        fp = gdir.get_filepath('vas_diagnostics', filesuffix='_hist')
+        fmod = vascaling.FileModel(fp)
+        with xr.open_dataset(fp) as ds:
+            ds = ds.load()
+        fmod.run_until(1975)
+        np.testing.assert_allclose(fmod.area_m2,
+                                   float(ds.area_m2.sel(time=1975)))
+        np.testing.assert_allclose(fmod.min_hgt,
+                                   float(ds.min_hgt.sel(time=1975)))
+        fmod.reset()
+        np.testing.assert_allclose(fmod.area_m2, fmod.area_m2_0)
