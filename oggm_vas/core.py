@@ -8,6 +8,7 @@ Author: Moritz Oberrauch
 """
 # Built ins
 import logging
+import os
 from time import gmtime, strftime
 
 # External libs

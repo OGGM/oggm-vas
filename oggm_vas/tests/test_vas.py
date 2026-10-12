@@ -272,7 +272,7 @@ class TestVAScalingModel(unittest.TestCase):
             calibrate_param1='melt_f', calibrate_param2='prcp_fac',
             calibrate_param3='temp_bias', overwrite_gdir=True,
             overwrite_observations=True)
-        fls = gdir.read_pickle('inversion_flowlines')
+        fls = gdir.read_store('inversion_flowlines')
         mb_oggm = massbalance.MonthlyTIModel(gdir).get_specific_mb(
             fls=fls, year=years)
 
@@ -321,7 +321,7 @@ class TestVAScalingModel(unittest.TestCase):
         """The VAS model describes the glacier as a whole."""
         gdir = self._calibrated_gdir()
         mbmod = vascaling.VAScalingMassBalance(gdir)
-        fls = gdir.read_pickle('inversion_flowlines')
+        fls = gdir.read_store('inversion_flowlines')
         with pytest.raises(oggm.exceptions.InvalidWorkflowError):
             mbmod.get_specific_mb(fls=fls * 2, year=1975)
 
