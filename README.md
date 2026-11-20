@@ -45,7 +45,7 @@ workflow in one short function.
     vascaling.initialize()                 # cfg.initialize() + scaling params
     gdirs = workflow.init_glacier_directories(
         rgi_ids, from_prepro_level=3, prepro_border=160,
-        prepro_base_url='.../oggm_v1.6/L3-L5_files/2023.3/centerlines/W5E5/')
+        prepro_base_url='.../oggm_v1.6/L3-L5_files/2023.3/elev_bands/W5E5/')
     workflow.execute_entity_task(
         vascaling.terminus_profile_from_flowlines, gdirs)
     workflow.execute_entity_task(
@@ -55,8 +55,9 @@ workflow in one short function.
 
 Centerline and elevation band directories both work. The VAS mass balance
 model sets `uses_geometry = False` (OGGM PR #2042), so OGGM's calibration
-reads no flowlines and does not hand it one flowline at a time. The example
-uses centerlines.
+reads no flowlines and does not hand it one flowline at a time. Use
+elevation bands all the same: the terminus profile needs a flowline whose
+length is close to the scaling length (see open problem 1).
 
 ## What is in the package
 
@@ -185,24 +186,27 @@ enough.
 
 This is Ben's idea, with OGGM's terrain instead of a fitted function.
 `terminus_profile_from_flowlines` stores the surface elevation along the main
-flowline and the downstream line (centerline or elevation band directories,
-same thing below the tongue). `TerminusProfile` then places the terminus
-there: the change in VAS length since the RGI date is applied as a distance
-along that line, anchored so that the RGI glacier sits on the RGI terminus.
+flowline and the downstream line. `TerminusProfile` then places the
+terminus there: the VAS length relative to the RGI glacier is mapped onto
+the distance along that line (`s = s_0 L / L_0`), anchored so that the RGI
+glacier sits on the RGI terminus. On a straight line this is Eq. (8).
 It does not extrapolate past the end of the downstream line, and the
 terminus never rises as the glacier grows. Every task that builds a model
 from a glacier directory uses the profile when the file is there, and falls
 back to Eq. (8) when it is not.
 
-Mapping the length change as a ratio (`s = s_0 L / L_0`, which is Eq. (8) on
-a straight line) was tried first and runs away on centerlines, because the
-flowline length and the scaling length differ (6.9 and 4.9 km for
-Hintereisferner). The difference in metres does not depend on which
-flowlines are used.
+Use elevation band directories. On centerlines the main flowline is much
+longer than the scaling length (6.9 against 4.9 km for Hintereisferner), so
+every metre of advance is stretched down the valley and the reconstruction
+runs away, and the main flowline often starts well below the highest ice.
+For elevation bands the two lengths agree within 15 % on the three test
+glaciers. Mapping the length difference in metres (`s = s_0 + L - L_0`)
+instead was tried; it avoids the stretch but puts a vanishing glacier part
+way down the line instead of at the top.
 
 What it does (W5E5, `informed_threestep`, three Alpine glaciers): the
-terminus now feeds back on the mass balance the way it should, and that
-breaks the start-area search. See open problem 3.
+terminus now feeds back on the mass balance, and that breaks the
+start-area search. See open problem 3.
 
 ## Open problem 2: the temperature bias decides the reconstruction
 
@@ -280,33 +284,39 @@ question.
 
 ## Open problem 3: the RGI area does not determine the 1901 glacier
 
-With the terminus following the terrain, the mass balance of the whole
-glacier follows its length: a long glacier has a low terminus and melts more.
-That is the restoring feedback a glacier should have, and it makes a
-reconstruction from 1901 ill-posed, as it is with OGGM's flowline model.
+As soon as the terminus is tied to a fixed reference glacier (the RGI one),
+a larger glacier has a lower terminus and a more negative balance. That
+feedback makes the reconstruction from 1901 ill-posed.
+`examples/terminus_experiments.py` compares three options on the Alpine
+test glaciers (elevation bands, GSWP3-W5E5, `informed_threestep`):
 
-- The area at the RGI date depends only weakly on the 1901 area, and not
-  monotonically. A century is several response times; the glacier forgets
-  where it started. For RGI60-11.00787 several 1901 areas end on the RGI
-  area.
-- The non-monotonicity comes from the time scales. The area follows the
-  volume within about a decade, the length (and with it the terminus, which
-  sets the whole mass balance) takes several decades. A large 1901 glacier
-  keeps its low terminus and very negative balance after its area has gone,
-  and overshoots.
-- Eq. (8) anchored on the start year escapes this only because every start
-  glacier sits on today's terminus, whatever its size. The map from 1901 to
-  the RGI date is then nearly linear: easy to invert, but without the
-  feedback.
-- The terminus at the RGI date is still not the observed one, because the
-  length lags the area. So the run does not have the geometry the mass
-  balance was calibrated on. Moving the anchor until the run hits the
-  observed terminus works for Hintereisferner (and the modelled 2000-2020
-  balance then lands within the Hugonnet error without being fitted). For
-  the two other glaciers the simple iteration jumps between two branches,
-  which is the instability Ben described.
+- Eq. (8) anchored on the start glacier (MATLAB script, previous port): the
+  area at the RGI date grows steadily with the 1901 area, one solution per
+  glacier. Every start glacier sits on today's terminus, so there is no
+  size feedback between start states.
+- Eq. (8) anchored on the RGI glacier (the paper's text): the strongest
+  feedback. Two 1901 areas reproduce the RGI area for Hintereisferner and
+  Kesselwandferner, none for RGI60-11.00746. Our start-area search assumes
+  one solution and fails for two of the three.
+- Terrain profile anchored on the RGI glacier: the same feedback, weaker
+  and bounded. One solution for Hintereisferner, three each for the other
+  two. The search returns whichever it brackets first.
 
-Scripts that produce all of this: `examples/terminus_experiments.py`.
+Where this comes from:
+
+- The area follows the volume within about a decade (tau_A), the length
+  and with it the terminus, which sets the whole-glacier balance, takes
+  three to five times longer (tau_L). A large 1901 glacier keeps its low
+  terminus and very negative balance after its area has gone, and
+  overshoots. A century is two to three length response times, so with the
+  feedback the glacier mostly forgets where it started.
+- The terminus at the RGI date is not the observed one either, because the
+  length lags the area, so the run does not have the geometry the mass
+  balance was calibrated on. Moving the anchor (the length that sits on the
+  observed terminus) until the run also hits the observed terminus works for
+  Hintereisferner; its 2000-2019 balance then lands within the Hugonnet error
+  without being fitted. For the two others the terminus error jumps over
+  zero where the start-area search changes branch, and there is no match.
 
 ## Comparison with Ben's MATLAB code
 

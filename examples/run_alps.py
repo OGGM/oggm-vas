@@ -7,9 +7,9 @@ of ice dynamics. No inversion is needed.
 The glacier directories have to provide `gridded_data` (for the glacier
 elevation range), `climate_historical`, and `inversion_flowlines` plus
 `downstream_line` for the terminus profile. Prepro level 3 gives all of
-them, with centerlines or elevation bands. We use centerlines: below the
-present tongue both follow the same downstream line, above it the centerline
-follows the real main tongue when the glacier retreats.
+them. We use elevation bands: their flowline length is close to the
+scaling length of the VAS model and their top close to the glacier top,
+which is what the terminus profile needs.
 
 The key step is `run_reconstruction`: it picks the glacier area at `ys` so
 that the model reproduces the RGI area at the inventory date, then carries on
@@ -54,12 +54,12 @@ def run(ys=YS, dynamic_calibration=False):
     cfg.PATHS['working_dir'] = utils.mkdir(
         os.path.join(os.path.expanduser('~'), 'OGGM', 'vas_alps'))
 
-    # Centerlines, W5E5 climate, level 3. The border of 160 grid points
+    # Elevation bands, W5E5 climate, level 3. The border of 160 grid points
     # gives a downstream line long enough for the large past glaciers.
     gdirs = workflow.init_glacier_directories(
         RGI_IDS, from_prepro_level=3, prepro_border=160,
         prepro_base_url=('https://cluster.klima.uni-bremen.de/~oggm/gdirs/'
-                         'oggm_v1.6/L3-L5_files/2023.3/centerlines/W5E5/'))
+                         'oggm_v1.6/L3-L5_files/2023.3/elev_bands/W5E5/'))
 
     # The terminus moves along the main flowline and the downstream line
     # rather than along the straight line of Eq. (8) of Marzeion et al. (2012)

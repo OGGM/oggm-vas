@@ -103,18 +103,21 @@ Working:
 - `VAScalingMassBalance` subclasses `MonthlyTIModel`, overrides only
   `_get_climate_for_index`, and sets `uses_geometry = False` (OGGM PR #2042),
   so OGGM's calibration never reads flowlines for it. Centerline and
-  elevation band dirs both work. `informed_threestep` runs (needs
+  elevation band dirs both calibrate; use elevation bands for the profile. `informed_threestep` runs (needs
   `temp_bias_file_path`).
 - `terminus_profile_from_flowlines` + `TerminusProfile`: the terminus
-  follows the main flowline surface and the downstream line. The change in
-  VAS length since the RGI date is applied as a distance (s = s_0 + L - L_0),
-  anchored on the DEM minimum at the RGI date, monotonic, clamped at the end
-  of the line. Used automatically when `vas_terminus_profile.json` exists;
-  otherwise Eq. (8) anchored at the start year (the 2012 / MATLAB behaviour).
-  The ratio mapping s = s_0 L/L_0 was tried and runs away on centerlines.
+  follows the main flowline surface and the downstream line. The VAS length
+  is mapped as a ratio, s = s_0 L/L_0 (Eq. (8) on a straight line), anchored
+  on the DEM minimum at the RGI date, monotonic, clamped at the end of the
+  line. Used automatically when `vas_terminus_profile.json` exists; otherwise
+  Eq. (8) anchored at the start year (MATLAB / Moritz behaviour). Elevation
+  bands, because their length is close to the scaling length (s_0/L_0 0.99 -
+  1.14 on the Alpine three; centerlines up to 1.4, which runs away). The
+  difference mapping s = s_0 + L - L_0 was tried and dropped: a vanishing
+  glacier ends part way down the line.
 - `find_start_area`, `run_reconstruction`, `mb_calibration_dynamic_...`
   (probably to drop), the two diagnostics files, `examples/run_alps.py`
-  (centerlines b_160), `examples/terminus_experiments.py`.
+  (elev_bands b_160), `examples/terminus_experiments.py`.
 
 ### The 1901 initialisation is ill-posed (Nov 2026)
 

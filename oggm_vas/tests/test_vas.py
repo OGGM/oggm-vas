@@ -602,19 +602,19 @@ class TestVAScalingModel(unittest.TestCase):
                   cfg.PARAMS['ice_density'] / gdir.rgi_area_m2 / 50)
         np.testing.assert_allclose(dmdtda, REF_MB, atol=1.)
 
-    def test_terminus_profile_on_a_straight_line(self):
-        """On a straight profile the terminus moves down the slope by the
-        change in length since the reference glacier."""
+    def test_terminus_profile_is_eq8_on_a_straight_line(self):
+        """On a straight profile the terminus is Eq. (8) of Marzeion et al.
+        (2012), anchored at the reference glacier."""
         z_max, z_ref, dx, s_ref, l_ref = 3500., 2500., 50., 5000., 4000.
-        slope = (z_ref - z_max) / s_ref
         s = (np.arange(400) + 0.5) * dx
         # a profile that misses the reference terminus by 20 m: the offset
         # is removed so that the RGI terminus is kept
-        surface_h = z_max + slope * s + 20
+        surface_h = z_max + (z_ref - z_max) * s / s_ref + 20
         tp = vascaling.TerminusProfile(surface_h, dx, s_ref, l_ref, z_ref,
                                        max_hgt=z_max)
-        for dl in [-3000., 0., 1000., 5000.]:
-            np.testing.assert_allclose(tp(l_ref + dl), z_ref + slope * dl)
+        for f in [0.3, 1., 1.5, 3.]:
+            np.testing.assert_allclose(tp(f * l_ref),
+                                       z_max + f * (z_ref - z_max))
         # no extrapolation past the end of the line
         assert tp(100 * l_ref) == tp.lowest_hgt
 

@@ -229,12 +229,19 @@ class TerminusProfile(object):
 
     Replaces Eq. (8) of Marzeion et al. (2012),
     `z_term = z_max + (L / L_0) (z_term_0 - z_max)`, which moves the terminus
-    along a straight line from the top of the glacier. Here the change in VAS
-    length since the RGI date is applied along the flowline, s = s_0 + L -
-    L_0, with s_0 the flowline length of the RGI glacier and L_0 its VAS
-    (scaling) length, and the terminus sits at the elevation of the profile
-    there. It follows the slope of the valley below the present tongue and
-    does not extrapolate past the end of the downstream line.
+    along a straight line from the top of the glacier. Here the VAS length,
+    relative to the RGI glacier, is mapped onto the distance along the
+    flowline, s = s_0 L / L_0, with s_0 the flowline length of the RGI
+    glacier and L_0 its VAS (scaling) length. The terminus sits at the
+    elevation of the profile there. On a straight profile this is Eq. (8).
+    It follows the slope of the valley below the present tongue and does not
+    extrapolate past the end of the downstream line.
+
+    Use elevation band flowlines: their length is close to the scaling
+    length and their top close to the glacier top. On centerlines s_0 / L_0
+    can be well above 1 (1.4 for Hintereisferner), which stretches every
+    metre of advance down the valley, and the main flowline often starts
+    well below the highest ice.
 
     The profile is shifted so that it returns `min_hgt_ref` at L_0, keeping
     the RGI-date terminus the same as the one used for the calibration, and
@@ -286,7 +293,7 @@ class TerminusProfile(object):
     def __call__(self, length_m):
         """Terminus elevation [m asl.] for a glacier of VAS length
         `length_m` [m]."""
-        s = self.glacier_length_m + length_m - self.length_m_ref
+        s = self.glacier_length_m * length_m / self.length_m_ref
         z = float(np.interp(s, self.distance_m, self.surface_h))
         if self.max_hgt is not None:
             z = min(z, self.max_hgt)
