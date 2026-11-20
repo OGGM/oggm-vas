@@ -305,12 +305,6 @@ reconstruction from 1901 ill-posed, as it is with OGGM's flowline model.
   balance then lands within the Hugonnet error without being fitted). For
   the two other glaciers the simple iteration jumps between two branches,
   which is the instability Ben described.
-- OGGM's answer is to start from equilibrium with a temperature bias and
-  tune the bias. In VAS the equilibrium is cheap: the balance depends only on
-  the terminus height, so the zero-balance height gives the length (from the
-  profile) and the area (from scaling). Matching the RGI area that way is
-  unique for two of the three glaciers, not for the third, and for one of
-  them the RGI area barely depends on the bias.
 
 Scripts that produce all of this: `examples/terminus_experiments.py`.
 
@@ -380,11 +374,10 @@ Different in inputs and parameters (not tested numerically):
 1. Done: the terminus follows the OGGM flowline and downstream line
    (`terminus_profile_from_flowlines`). Still open: `max_hgt`, which is
    constant and wrong for a glacier that shrinks a lot.
-2. Decide how to initialise the 1901 glacier (open problem 3): equilibrium
-   with a temperature bias as in OGGM, a later start year, or more
-   observations. Then anchor the terminus at the inventory date on top
-   (dT and the anchor as two unknowns, area and terminus as two targets),
-   with a rule for glaciers that have several solutions or none.
+2. Decide how to initialise the 1901 glacier (open problem 3): what
+   constrains it beyond the RGI area, and a rule for glaciers that have
+   several solutions or none. Then match the terminus at the inventory date
+   as well as the area.
 3. The temperature bias of the calibration (open problem 2). OGGM's
    `informed_threestep` runs with this model; pass `temp_bias_file_path`.
 4. Re-check the three Alpine glaciers against Fig. 13 of the paper.

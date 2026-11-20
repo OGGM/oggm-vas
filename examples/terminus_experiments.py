@@ -8,9 +8,7 @@ file in the working directory:
 2. the reconstruction from 1901 with each option, and with the terminus
    anchored so that the run hits the observed terminus at the RGI date;
 3. the area at the RGI date as a function of the 1901 area;
-4. area trajectories from a few 1901 areas;
-5. the area at the RGI date when the 1901 glacier is in equilibrium with the
-   1901-1930 climate plus a temperature bias dT.
+4. area trajectories from a few 1901 areas.
 
 See "Open problem 3" in the README. Run with python
 examples/terminus_experiments.py; it downloads the same prepro directories
@@ -18,7 +16,6 @@ as run_alps.py.
 """
 import warnings, json; warnings.simplefilter('ignore')
 import numpy as np
-from scipy.optimize import brentq
 from oggm import cfg, workflow
 import oggm_vas as vas
 from oggm_vas import core as c
@@ -32,28 +29,6 @@ BASE_URL = ('https://cluster.klima.uni-bremen.de/~oggm/gdirs/oggm_v1.6/'
 URL = 'https://cluster.klima.uni-bremen.de/~oggm/ref_mb_params/oggm_v1.6/w5e5_rgi6_perglacier_temp_bias_v2025.6.2.csv'
 IDS = {'RGI60-11.00897': 'Hintereisferner', 'RGI60-11.00787': 'RGI60-11.00787', 'RGI60-11.00746': 'RGI60-11.00746'}
 YS, YE = 1901, 2020
-SPIN = np.arange(1901, 1931)
-
-def area_from_length(L):
-    cl, ca, ql, gamma = c._scaling_params('Glacier')
-    return (cl * L ** ql / ca) ** (1 / gamma)
-
-def eq_area(mbmod, tp, dT):
-    tb0 = mbmod.temp_bias
-    mbmod.temp_bias = tb0 + dT
-    def mb(z):
-        mbmod.min_hgt = z
-        return np.mean(mbmod.get_specific_mb(year=SPIN))
-    try:
-        zlo, zhi = tp.lowest_hgt, tp.max_hgt - 1
-        if mb(zlo) > 0: z = zlo
-        elif mb(zhi) < 0: return None
-        else: z = brentq(mb, zlo, zhi, xtol=0.1)
-    finally:
-        mbmod.temp_bias = tb0
-    Lmax = tp.length_m_ref + tp.distance_m[-1]
-    L = brentq(lambda L: tp(L) - z - 1e-6, 1., Lmax) if tp(Lmax) < z else Lmax
-    return area_from_length(L)
 
 def series(ds):
     return {'area': [round(float(x) / 1e6, 4) for x in ds.area_m2.values],
@@ -130,16 +105,6 @@ for gd in gdirs:
             traj[name].append([round(float(x) / 1e6, 4) for x in ds.area_m2.values])
     g['traj'] = traj
 
-    # 5. equilibrium start with a temperature bias
-    dTs = np.round(np.arange(-2.0, 1.51, 0.05), 2)
-    eq = {'dT': [], 'a1901': [], 'a_target': [], 'z_target': []}
-    for dT in dTs:
-        A = eq_area(mbmod, tp, dT)
-        if A is None: continue
-        m = c._start_model(ref_new, A, YS); m.run_until(target)
-        eq['dT'].append(float(dT)); eq['a1901'].append(round(A / 1e6, 4))
-        eq['a_target'].append(round(m.area_m2 / 1e6, 4)); eq['z_target'].append(round(m.min_hgt, 1))
-    g['eq'] = eq
     out['glaciers'].append(g)
 
 fp = os.path.join(WD, 'terminus_experiments.json')

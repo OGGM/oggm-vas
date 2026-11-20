@@ -131,11 +131,10 @@ breaks the same way OGGM's does:
   Iterating the anchor works for HEF (12.5 km2 in 1901, run MB within the
   Hugonnet error) and oscillates between two branches for the other two -
   Ben's instability.
-- equilibrium start with a dT (OGGM-style; in VAS the zero-MB terminus height
-  gives L from the profile and A from scaling) is unique for 2 of 3 glaciers.
 
-Not decided: how to initialise (equilibrium + dT, later start, more data),
-how to pick among several solutions. Handed to Ben and others with a page of
+Not decided: how to initialise, how to pick among several solutions. An
+OGGM-style equilibrium spin-up with a temperature bias was tried and judged
+not useful (Fabien, Nov 2026). Handed to Ben and others with a page of
 plots (Nov 2026).
 
 ### Gotchas
