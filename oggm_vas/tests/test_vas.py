@@ -317,6 +317,26 @@ class TestVAScalingModel(unittest.TestCase):
         for key, value in expected.items():
             np.testing.assert_allclose(df[key], value)
 
+    def test_mb_calibration_multiple_flowlines(self):
+        """OGGM's calibration ignores the flowlines of a VAS model
+        (`uses_geometry = False`), so a centerline glacier directory gives
+        the same parameters as a single flowline one."""
+        gdir = self._calibrated_gdir()
+        expected = {k: gdir.settings[k]
+                    for k in ['melt_f', 'prcp_fac', 'temp_bias']}
+
+        self.clean_dir()
+        cfg.PARAMS['use_multiple_flowlines'] = True
+        gdir = self._calibrated_gdir()
+        assert len(gdir.read_store('inversion_flowlines')) > 1
+        for key, value in expected.items():
+            np.testing.assert_allclose(gdir.settings[key], value)
+
+        with pytest.raises(oggm.exceptions.InvalidParamsError):
+            vascaling.mb_calibration_from_geodetic_mb(
+                gdir, use_observations_file=True, overwrite_gdir=True,
+                use_2d_mb=True)
+
     def test_multiple_flowlines_refused(self):
         """The VAS model describes the glacier as a whole."""
         gdir = self._calibrated_gdir()
@@ -581,6 +601,55 @@ class TestVAScalingModel(unittest.TestCase):
                    float(ds.volume_m3.sel(time=1953))) *
                   cfg.PARAMS['ice_density'] / gdir.rgi_area_m2 / 50)
         np.testing.assert_allclose(dmdtda, REF_MB, atol=1.)
+
+    def test_terminus_profile_on_a_straight_line(self):
+        """On a straight profile the terminus moves down the slope by the
+        change in length since the reference glacier."""
+        z_max, z_ref, dx, s_ref, l_ref = 3500., 2500., 50., 5000., 4000.
+        slope = (z_ref - z_max) / s_ref
+        s = (np.arange(400) + 0.5) * dx
+        # a profile that misses the reference terminus by 20 m: the offset
+        # is removed so that the RGI terminus is kept
+        surface_h = z_max + slope * s + 20
+        tp = vascaling.TerminusProfile(surface_h, dx, s_ref, l_ref, z_ref,
+                                       max_hgt=z_max)
+        for dl in [-3000., 0., 1000., 5000.]:
+            np.testing.assert_allclose(tp(l_ref + dl), z_ref + slope * dl)
+        # no extrapolation past the end of the line
+        assert tp(100 * l_ref) == tp.lowest_hgt
+
+    def test_terminus_profile(self):
+        """The profile follows the downstream line and is anchored at the
+        RGI terminus; the reconstruction then passes through it."""
+        gdir = self._calibrated_gdir()
+        centerlines.compute_downstream_line(gdir)
+        centerlines.compute_downstream_bedshape(gdir)
+        vascaling.terminus_profile_from_flowlines(gdir)
+        tp = vascaling.TerminusProfile.from_gdir(gdir)
+
+        min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
+        np.testing.assert_allclose(tp(tp.length_m_ref), min_hgt)
+        assert tp.length_m_ref == vascaling.scaling_length(gdir.rgi_area_m2)
+        lengths = np.linspace(0, 3, 31) * tp.length_m_ref
+        z = np.array([tp(l) for l in lengths])
+        assert np.all(np.diff(z) <= 0)
+        assert z[0] <= max_hgt
+        assert tp.lowest_hgt < min_hgt - 100
+
+        vascaling.run_reconstruction(gdir, ys=1950, output_filesuffix='_tp')
+        mbmod = vascaling.VAScalingMassBalance(gdir)
+        target_yr = vascaling.core._target_year(gdir, mbmod, None)
+        with xr.open_dataset(gdir.get_filepath('vas_diagnostics',
+                                               filesuffix='_tp')) as ds:
+            ds = ds.load()
+        np.testing.assert_allclose(float(ds.area_m2.sel(time=target_yr)),
+                                   gdir.rgi_area_m2, rtol=1e-4)
+        # the terminus is read off the profile at the modelled length. Note
+        # that this is not the RGI terminus at the RGI date: the length
+        # relaxes more slowly than the area (tau_l > tau_a), so a shrinking
+        # glacier is still longer than the scaling length of its area.
+        np.testing.assert_allclose(ds.min_hgt.values,
+                                   [tp(l) for l in ds.length_m.values])
 
     def test_fixed_geometry_mass_balance(self):
         """The fixed geometry series must match the mass balance model."""

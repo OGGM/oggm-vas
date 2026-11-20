@@ -34,7 +34,7 @@ Achieving this probably includes:
 - make OGGM-VAS work with the new calibration
 - if needed, make some upstream changes in OGGM to allow for some oggm-vas quirks. if these changes in OGGM are too consequent, we copy-paste what we need here and make the changes here (we override the upstream function).
 
-### Current state (Sep 2026)
+### Port background (Sep 2026)
 
 The package does not import against current OGGM: `entity_task(writes=['climate_info'])`
 raises `KeyError: 'climate_info'` at import time. `oggm_vas/core.py` is written for
@@ -92,71 +92,51 @@ Design decisions for the port:
   on t*) is redefined as the mean solid precipitation over the calibration reference period.
 - The workflow assumes standard OGGM prepro L3 glacier directories.
 
-### State (Sep 2026)
+### State (Nov 2026)
 
-Branch `dev`. `pytest oggm_vas` is green: 26 tests, ~45 s, no downloads.
+Branch `dev`. `pytest oggm_vas` is green: 29 tests, ~45 s, no downloads.
+README.md is the detailed handover note (open problems 1-3, next steps) and
+is kept up to date; read it first.
 
-Committed and working:
+Working:
 
-- `VAScalingMassBalance` subclasses OGGM's `MonthlyTIModel` and overrides only
-  `_get_climate_for_index`, so OGGM's own calibration drives it as
-  `mb_model_class`. No OGGM changes were needed.
-- `mb_calibration_from_geodetic_mb` (thin wrapper on OGGM's), calibration
-  closes to ~1e-13 on real prepro dirs.
-- `find_start_area` is a root search with a widening bracket; it raises rather
-  than returning a silent non-match.
-- `run_reconstruction` runs the whole climate record and passes through the
-  RGI area at the inventory date.
-- `mb_calibration_dynamic_from_geodetic_mb` fits melt_f against the evolving
-  glacier, OGGM's dmdtda convention. See below - probably drop it.
-- Output split: `model_diagnostics` (volume/area/length, readable by
-  `utils.compile_run_output`) and `vas_diagnostics` (adds spec_mb, min_hgt,
-  max_hgt, tau_l, tau_a). `FileModel` reads the latter.
-- `examples/run_alps.py`.
+- `VAScalingMassBalance` subclasses `MonthlyTIModel`, overrides only
+  `_get_climate_for_index`, and sets `uses_geometry = False` (OGGM PR #2042),
+  so OGGM's calibration never reads flowlines for it. Centerline and
+  elevation band dirs both work. `informed_threestep` runs (needs
+  `temp_bias_file_path`).
+- `terminus_profile_from_flowlines` + `TerminusProfile`: the terminus
+  follows the main flowline surface and the downstream line. The change in
+  VAS length since the RGI date is applied as a distance (s = s_0 + L - L_0),
+  anchored on the DEM minimum at the RGI date, monotonic, clamped at the end
+  of the line. Used automatically when `vas_terminus_profile.json` exists;
+  otherwise Eq. (8) anchored at the start year (the 2012 / MATLAB behaviour).
+  The ratio mapping s = s_0 L/L_0 was tried and runs away on centerlines.
+- `find_start_area`, `run_reconstruction`, `mb_calibration_dynamic_...`
+  (probably to drop), the two diagnostics files, `examples/run_alps.py`
+  (centerlines b_160), `examples/terminus_experiments.py`.
 
-### The reconstruction is too weak - two fixes diagnosed, NOT merged
+### The 1901 initialisation is ill-posed (Nov 2026)
 
-Reconstructing Hintereisferner from 1901 gives 8.82 km2 against 8.04 at the
-inventory date: a 10% change where Fig. 13 of Marzeion et al. (2012) has
-11.3 km2 in 1920 and 10.5 in 1940, i.e. ~29%. The modelled MB on the fixed
-inventory geometry is ~0 for most of the century (1901-30: -49, 1960-90: -55
-kg m-2 yr-1) and only negative after 1990, so there is no accumulated loss for
-the start-area search to undo.
+With the terrain-following terminus, the whole-glacier MB follows the
+length, which is the right restoring feedback, and the start-area search
+breaks the same way OGGM's does:
 
-Two causes, both ours, additive:
+- area at the RGI date vs 1901 area is flat and non-monotonic (several roots
+  for RGI60-11.00787). Cause: area follows volume in ~10 yr, length (hence
+  terminus, hence MB) in ~30-50 yr, so big glaciers overshoot.
+- Eq. (8) anchored at the start year only escapes this because every start
+  glacier sits on today's terminus: a near-linear, invertible, unphysical map.
+- the terminus at the RGI date is not the observed one (length lags area).
+  Iterating the anchor works for HEF (12.5 km2 in 1901, run MB within the
+  Hugonnet error) and oscillates between two branches for the other two -
+  Ben's instability.
+- equilibrium start with a dT (OGGM-style; in VAS the zero-MB terminus height
+  gives L from the profile and A from scaling) is unique for 2 of 3 glaciers.
 
-1. **No temperature bias.** We fit melt_f alone with temp_bias 0. A warm bias
-   acts non-linearly through the melt threshold, so it lifts melt much more in
-   the cold early century than in the recent decades. With melt_f re-fitted to
-   the same -1100 target, OGGM's own +1.758 for this glacier moves 1901-30
-   from -49 to -286 and the 1901 area from 8.82 to 10.04 km2. OGGM's
-   `informed_threestep` (priors on temp_bias and prcp_fac, then prcp_fac ->
-   melt_f -> temp_bias) is what we should be using and have not tested.
-2. **The terminus stops responding to glacier size.** Marzeion 2012 Eq. (8) is
-   `z_term = z_max + (L/L_0)(z_term_measured - z_max)` with L_0 the length in
-   the year of the area measurement. `create_start_glacier` re-anchors L_0 and
-   the reference terminus to the *start* year, so the 1901 glacier gets
-   today's terminus however big it is, and the terminus rises as the glacier
-   shrinks instead of falling as it grows. Sensitivity is large: dropping the
-   terminus 200 m moves 1901-30 MB from -49 to -923.
-
-Together (temp_bias +1.76, Eq. (8) anchoring, floor at the lowest ice):
-1901 11.61, 1920 11.38, 1940 10.75 km2, rate -1027, against observed ~11.3 /
-11.30 / 10.50 / -1100. Neither fix alone gets there.
-
-Caveats on fix 2: Eq. (8) unbounded runs away (its implied slope for HEF is
-~26%, vs ~10% for the terrain below the tongue, so a 10% length increase puts
-the terminus 126 m below the lowest ice). A floor at the lowest ice (2431 m
-for HEF) works; a floor at the bottom of the downstream line (1945 m)
-overshoots badly (1901 area 60 km2). The real fix is to follow the downstream
-elevation profile rather than extrapolate linearly - OGGM computes it
-(`downstream_line`, key `surface_h`). That would also let `max_hgt` move,
-which is currently constant and wrong for a much smaller glacier.
-
-In the fixed configuration the static fit already gives -1027 against -1100,
-and the dynamic calibration becomes unnecessary and ill-behaved (modelled rate
-is non-monotonic in melt_f under the current anchoring). Recommendation: drop
-`mb_calibration_dynamic_from_geodetic_mb`, keep the static fit.
+Not decided: how to initialise (equilibrium + dT, later start, more data),
+how to pick among several solutions. Handed to Ben and others with a page of
+plots (Nov 2026).
 
 ### Gotchas
 
@@ -166,10 +146,10 @@ is non-monotonic in melt_f under the current anchoring). Recommendation: drop
 - `gdir.settings` falls back to the legacy `mb_calib.json` for
   melt_f/prcp_fac/temp_bias, so an uncalibrated VAS gdir silently reads
   OGGM's flowline values (melt_f 5.0, temp_bias 1.758 for HEF).
-- `mb_calibration_from_scalar_mb` reads `inversion_flowlines` unconditionally
-  and wraps the model class in `MultipleFlowlineMassBalance` when a glacier has
-  more than one flowline, so VAS needs elevation band dirs.
-  `VAScalingMassBalance.get_specific_mb` raises if handed more than one.
+- `uses_geometry = False` needs OGGM after PR #2042. Older OGGM wraps the
+  model in `MultipleFlowlineMassBalance` on centerline dirs and fails.
+- `spec_mb` in `vas_diagnostics` at time t is the MB of year t-1; the first
+  year is repeated.
 - `override_missing` in OGGM's geodetic calibration only catches KeyError, so
   it does not help when the period is absent from the Hugonnet table.
 - `utils.compile_run_output` rejects unknown diagnostic variables and reads
@@ -188,8 +168,6 @@ is non-monotonic in melt_f under the current anchoring). Recommendation: drop
 
 ### Next
 
-1. Run OGGM's `informed_threestep` through `VAScalingMassBalance`.
-2. Fix the Eq. (8) anchoring in `create_start_glacier`; decide the terminus
-   bound (downstream profile preferred over a flat floor).
-3. Re-check the three Alpine test glaciers against Fig. 13.
-4. Then prepro dirs with the full 1901-2020 reconstruction.
+See README "Next steps". In short: decide the initialisation, then anchor the
+terminus at the RGI date on top, then re-check against Fig. 13, then prepro
+dirs with the 1901-2020 reconstruction.

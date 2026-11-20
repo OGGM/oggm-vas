@@ -174,6 +174,130 @@ def get_min_max_elevation(gdir):
     return min_elev, max_elev
 
 
+def _scaling_params(glacier_type):
+    """Scaling constants and exponents (c_l, c_a, q_l, gamma) for the given
+    glacier type."""
+    if glacier_type == 'Glacier':
+        return (cfg.PARAMS['vas_c_length_m'], cfg.PARAMS['vas_c_area_m2'],
+                cfg.PARAMS['vas_q_length'], cfg.PARAMS['vas_gamma_area'])
+    elif glacier_type == 'Ice cap':
+        return (cfg.PARAMS['vas_c_icecap_length_m'],
+                cfg.PARAMS['vas_c_icecap_area_m2'],
+                cfg.PARAMS['vas_q_icecap_length'],
+                cfg.PARAMS['vas_gamma_icecap_area'])
+    raise InvalidParamsError("Glacier type can only be 'Glacier' "
+                             "or 'Ice cap'.")
+
+
+def scaling_length(area_m2, glacier_type='Glacier'):
+    """Glacier length [m] from area [m2], through volume/area and
+    volume/length scaling."""
+    cl, ca, ql, gamma = _scaling_params(glacier_type)
+    return (ca * area_m2 ** gamma / cl) ** (1 / ql)
+
+
+@entity_task(log, writes=['vas_terminus_profile'])
+def terminus_profile_from_flowlines(gdir):
+    """Store the surface elevation along the main flowline and the
+    downstream line, for :py:class:`TerminusProfile`.
+
+    The profile is the one OGGM's `init_present_time_glacier` builds for the
+    main flowline: the glacier surface down to the RGI terminus, then the
+    terrain along the downstream line. No inversion is needed.
+
+    Parameters
+    ----------
+    gdir : :py:class:`oggm.GlacierDirectory`
+    """
+    fl = gdir.read_store('inversion_flowlines')[-1]
+    dx_m = float(fl.dx * gdir.grid.dx)
+    surface_h = np.asarray(fl.surface_h, dtype=float)
+    glacier_length_m = len(surface_h) * dx_m
+    if not gdir.is_tidewater:
+        dic_ds = gdir.read_store('downstream_line')
+        surface_h = np.append(surface_h, dic_ds['surface_h'])
+
+    gdir.write_json({'dx_m': dx_m,
+                     'glacier_length_m': glacier_length_m,
+                     'surface_h': [float(h) for h in surface_h]},
+                    'vas_terminus_profile')
+
+
+class TerminusProfile(object):
+    """Terminus elevation as a function of glacier length, read off the
+    surface profile along the main flowline and downstream line.
+
+    Replaces Eq. (8) of Marzeion et al. (2012),
+    `z_term = z_max + (L / L_0) (z_term_0 - z_max)`, which moves the terminus
+    along a straight line from the top of the glacier. Here the change in VAS
+    length since the RGI date is applied along the flowline, s = s_0 + L -
+    L_0, with s_0 the flowline length of the RGI glacier and L_0 its VAS
+    (scaling) length, and the terminus sits at the elevation of the profile
+    there. It follows the slope of the valley below the present tongue and
+    does not extrapolate past the end of the downstream line.
+
+    The profile is shifted so that it returns `min_hgt_ref` at L_0, keeping
+    the RGI-date terminus the same as the one used for the calibration, and
+    made monotonic so the terminus never rises as the glacier grows.
+    """
+
+    def __init__(self, surface_h, dx_m, glacier_length_m, length_m_ref,
+                 min_hgt_ref, max_hgt=None):
+        """
+        Parameters
+        ----------
+        surface_h : array
+            surface elevation along the flowline, from the head down [m asl.]
+        dx_m : float
+            grid spacing of the profile [m]
+        glacier_length_m : float
+            flowline length of the RGI glacier, s_0 [m]
+        length_m_ref : float
+            the VAS (scaling) length of the RGI glacier, L_0 [m]
+        min_hgt_ref : float
+            the terminus elevation of the RGI glacier [m asl.]
+        max_hgt : float, optional
+            upper limit to the terminus elevation [m asl.]
+        """
+        surface_h = np.minimum.accumulate(np.asarray(surface_h, dtype=float))
+        # elevations sit at cell centres
+        self.distance_m = (np.arange(len(surface_h)) + 0.5) * dx_m
+        self.glacier_length_m = glacier_length_m
+        self.length_m_ref = length_m_ref
+        self.max_hgt = max_hgt
+        self.surface_h = (surface_h + min_hgt_ref
+                          - np.interp(glacier_length_m, self.distance_m,
+                                      surface_h))
+
+    @classmethod
+    def from_gdir(cls, gdir):
+        """The profile stored in `gdir` by
+        :py:func:`terminus_profile_from_flowlines`, or None if there is none.
+        """
+        fp = gdir.get_filepath('vas_terminus_profile')
+        if not os.path.exists(fp):
+            return None
+        d = gdir.read_json('vas_terminus_profile')
+        min_hgt, max_hgt = get_min_max_elevation(gdir)
+        return cls(d['surface_h'], d['dx_m'], d['glacier_length_m'],
+                   scaling_length(gdir.rgi_area_m2, gdir.glacier_type),
+                   min_hgt, max_hgt=max_hgt)
+
+    def __call__(self, length_m):
+        """Terminus elevation [m asl.] for a glacier of VAS length
+        `length_m` [m]."""
+        s = self.glacier_length_m + length_m - self.length_m_ref
+        z = float(np.interp(s, self.distance_m, self.surface_h))
+        if self.max_hgt is not None:
+            z = min(z, self.max_hgt)
+        return z
+
+    @property
+    def lowest_hgt(self):
+        """The lowest terminus elevation the profile can give [m asl.]."""
+        return float(self.surface_h[-1])
+
+
 def get_scaling_constant(gdirs):
     """ The scaling constants (c_l and c_a for volume/length and volume/area
     scaling respectively) are random variables and vary from glacier to
@@ -304,8 +428,14 @@ class VAScalingMassBalance(MonthlyTIModel):
 
     Because it honours the same parameters and the same interface as
     `MonthlyTIModel`, it can be handed to OGGM's calibration tasks as
-    `mb_model_class=VAScalingMassBalance`.
+    `mb_model_class=VAScalingMassBalance`. It sets `uses_geometry = False`,
+    so the calibration tasks read no flowlines or 2D data and call
+    `get_specific_mb` without geometry. That works with centerline and
+    elevation band glacier directories alike.
     """
+
+    # OGGM's calibration tasks read this before instantiation
+    uses_geometry = False
 
     def __init__(self, gdir, min_hgt=None, max_hgt=None,
                  prcp_clim_period=None, **kwargs):
@@ -397,8 +527,7 @@ class VAScalingMassBalance(MonthlyTIModel):
         if fls is not None and len(fls) > 1:
             raise InvalidWorkflowError(
                 'The volume/area scaling model describes the glacier as a '
-                'whole and cannot be used with more than one flowline. Use '
-                'elevation band flowlines (a single flowline per glacier).')
+                'whole and cannot be used with more than one flowline.')
 
         return super(VAScalingMassBalance, self).get_specific_mb(
             heights=np.array([self.min_hgt]), widths=np.array([1.]),
@@ -460,8 +589,9 @@ def mb_calibration_from_geodetic_mb(gdir, **kwargs):
 
     Convenience wrapper around
     :py:func:`oggm.core.massbalance.mb_calibration_from_geodetic_mb`, which
-    does all the work. The only thing this adds is the VAS mass balance model
-    as `mb_model_class` and OGGM's default three step calibration order.
+    does all the work. The only things this adds are the VAS mass balance
+    model as `mb_model_class` and OGGM's default three step calibration
+    order.
 
     Like OGGM, this writes `melt_f`, `prcp_fac` and `temp_bias` to the
     glacier directory settings.
@@ -515,7 +645,8 @@ def _reference_model(gdir, mb_model, target_yr):
     return VAScalingModel(year_0=target_yr, area_m2_0=gdir.rgi_area_m2,
                           min_hgt=min_hgt, max_hgt=max_hgt,
                           mb_model=mb_model,
-                          glacier_type=gdir.glacier_type)
+                          glacier_type=gdir.glacier_type,
+                          terminus_profile=TerminusProfile.from_gdir(gdir))
 
 
 def _start_model(model_ref, area_m2_start, year_start,
@@ -526,7 +657,8 @@ def _start_model(model_ref, area_m2_start, year_start,
                            min_hgt=model_ref.min_hgt_0,
                            max_hgt=model_ref.max_hgt,
                            mb_model=model_ref.mb_model,
-                           glacier_type=model_ref.glacier_type)
+                           glacier_type=model_ref.glacier_type,
+                           terminus_profile=model_ref.terminus_profile)
     model.create_start_glacier(area_m2_start, year_start=year_start,
                                adjust_term_elev=adjust_term_elev)
     return model
@@ -865,7 +997,8 @@ def run_from_climate_data(gdir, ys=None, ye=None, min_ys=None, max_ys=None,
     # instance the model
     model = VAScalingModel(year_0=ys, area_m2_0=init_area_m2,
                            min_hgt=min_hgt, max_hgt=max_hgt,
-                           mb_model=mb_mod, glacier_type=gdir.glacier_type)
+                           mb_model=mb_mod, glacier_type=gdir.glacier_type,
+                           terminus_profile=TerminusProfile.from_gdir(gdir))
     if fmod:
         # set initial state accordingly
         model.reset_from_filemodel(fmod)
@@ -1251,6 +1384,8 @@ class _VASMassBalanceWrapper(MassBalanceModel):
     the wrapped model, so that `VAScalingModel` can drive either of them.
     """
 
+    uses_geometry = False
+
     def __init__(self, gdir, **kwargs):
         super(_VASMassBalanceWrapper, self).__init__(gdir=gdir)
         self.mbmod = VAScalingMassBalance(gdir, **kwargs)
@@ -1524,7 +1659,8 @@ def run_random_climate(gdir, nyears=1000, y0=None, halfsize=15,
         init_area_m2 = gdir.rgi_area_m2
     model = VAScalingModel(year_0=0, area_m2_0=init_area_m2,
                            min_hgt=min_hgt, max_hgt=max_hgt,
-                           mb_model=mb_mod)
+                           mb_model=mb_mod, glacier_type=gdir.glacier_type,
+                           terminus_profile=TerminusProfile.from_gdir(gdir))
     if fmod:
         # set initial state accordingly
         model.reset_from_filemodel(fmod, y0=0)
@@ -1690,7 +1826,8 @@ def run_constant_climate(gdir, nyears=1000, y0=None, halfsize=15,
         init_area_m2 = gdir.rgi_area_m2
     model = VAScalingModel(year_0=0, area_m2_0=init_area_m2,
                            min_hgt=min_hgt, max_hgt=max_hgt,
-                           mb_model=mb_mod)
+                           mb_model=mb_mod, glacier_type=gdir.glacier_type,
+                           terminus_profile=TerminusProfile.from_gdir(gdir))
     if fmod:
         # set initial state accordingly
         model.reset_from_filemodel(fmod, y0=0)
@@ -1736,7 +1873,7 @@ class VAScalingModel(object):
                + "spec mb [mm w.e. yr-1]: {:.2f}".format(self.spec_mb)
 
     def __init__(self, year_0, area_m2_0, min_hgt, max_hgt, mb_model,
-                 glacier_type='Glacier'):
+                 glacier_type='Glacier', terminus_profile=None):
         """Instance new glacier model.
 
         year_0: float
@@ -1744,13 +1881,18 @@ class VAScalingModel(object):
         area_m2_0: float
             starting area at year_0 [m2]
         min_hgt: float
-            glacier terminus elevation at year_0 [m asl.]
+            glacier terminus elevation at year_0 [m asl.]. Ignored if
+            `terminus_profile` is given.
         max_hgt: float
             maximal glacier surface elevation at year_0 [m asl.]
         mb_model: :py:class:`oggm-vas.VAScalingMassBalance`
             instance of mass balance model
         glacier_type: str, optional, default='Glacier'
             specify whether to use 'Glacier' or 'Ice cap' scaling parameters
+        terminus_profile: :py:class:`TerminusProfile`, optional
+            if given, the terminus elevation is read off this profile as a
+            function of length, anchored at the RGI glacier, instead of
+            Eq. (8) anchored at year_0.
         """
 
         # ice density: keep it consistent with the mass balance model
@@ -1759,25 +1901,9 @@ class VAScalingModel(object):
             self.rho = cfg.PARAMS['ice_density']
 
         # gets scaling parameters depending on the glacier type
-        if glacier_type == 'Glacier':
-            # get scaling constants
-            self.cl = cfg.PARAMS['vas_c_length_m']
-            self.ca = cfg.PARAMS['vas_c_area_m2']
-            # get scaling exponents
-            self.ql = cfg.PARAMS['vas_q_length']
-            self.gamma = cfg.PARAMS['vas_gamma_area']
-        elif glacier_type == 'Ice cap':
-            # get scaling constants
-            self.cl = cfg.PARAMS['vas_c_icecap_length_m']
-            self.ca = cfg.PARAMS['vas_c_icecap_area_m2']
-            # get scaling exponents
-            self.ql = cfg.PARAMS['vas_q_icecap_length']
-            self.gamma = cfg.PARAMS['vas_gamma_icecap_area']
-        else:
-            raise InvalidParamsError("Glacier type can only be 'Glacier' "
-                                     "or 'Ice cap'.")
-
+        self.cl, self.ca, self.ql, self.gamma = _scaling_params(glacier_type)
         self.glacier_type = glacier_type
+        self.terminus_profile = terminus_profile
 
         # define temporal index
         self.year_0 = year_0
@@ -1796,6 +1922,9 @@ class VAScalingModel(object):
         # self.length = self.cl * area_0**self.ql
         self.length_m_0 = (self.volume_m3 / self.cl) ** (1 / self.ql)
         self.length_m = self.length_m_0
+        if self.terminus_profile is not None:
+            self.min_hgt = self.terminus_profile(self.length_m_0)
+            self.min_hgt_0 = self.min_hgt
 
         # define mass balance model and spec mb
         self.mb_model = mb_model
@@ -2002,8 +2131,11 @@ class VAScalingModel(object):
         # compute new length L(t+1)
         self.length_m = max(0, self.length_m + self.dL)
         # compute new terminus elevation min_hgt(t+1)
-        self.min_hgt = self.max_hgt + (self.length_m / self.length_m_0
-                                       * (self.min_hgt_0 - self.max_hgt))
+        if self.terminus_profile is not None:
+            self.min_hgt = self.terminus_profile(self.length_m)
+        else:
+            self.min_hgt = self.max_hgt + (self.length_m / self.length_m_0
+                                           * (self.min_hgt_0 - self.max_hgt))
 
         # increment year
         self.year += 1
@@ -2256,7 +2388,10 @@ class VAScalingModel(object):
         the code of Marzeion et. al. (2012), but is physically not consistent.
         It is possible to scale the corresponding terminus elevation given the
         most recent (measured) outline. However, this is not recommended since
-        the results may be strange. TODO: this should be fixed sometime...
+        the results may be strange.
+
+        With a `terminus_profile`, the start terminus is read off the profile
+        and `adjust_term_elev` has no effect.
 
         Parameters
         ----------
@@ -2280,7 +2415,8 @@ class VAScalingModel(object):
 
         self.__init__(year_start, area_m2_start, min_hgt_start,
                       self.max_hgt, self.mb_model,
-                      glacier_type=self.glacier_type)
+                      glacier_type=self.glacier_type,
+                      terminus_profile=self.terminus_profile)
 
     def run_and_compare(self, model_ref, time_scale_factor=1,
                         instant_geometry_change=False):

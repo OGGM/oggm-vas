@@ -11,7 +11,7 @@ running inside the [OGGM](https://oggm.org) workflow. Originally written by
 ported to current OGGM master in 2026.
 
 This README is a handover note. It describes where the port stands
-(October 2026), what is known to be wrong, and what to do next.
+(November 2026), what is known to be wrong, and what to do next.
 
 ## Status in short
 
@@ -33,7 +33,7 @@ This README is a handover note. It describes where the port stands
 
     pip install git+https://github.com/OGGM/oggm.git   # OGGM master
     pip install -e ".[tests]"
-    pytest oggm_vas                                    # 26 tests, ~40 s
+    pytest oggm_vas                                    # 29 tests, ~45 s
     python examples/run_alps.py                        # three Alpine glaciers
 
 The tests run on OGGM's sample data (Hintereisferner, HISTALP) and need no
@@ -45,14 +45,18 @@ workflow in one short function.
     vascaling.initialize()                 # cfg.initialize() + scaling params
     gdirs = workflow.init_glacier_directories(
         rgi_ids, from_prepro_level=3, prepro_border=160,
-        prepro_base_url='.../oggm_v1.6/L3-L5_files/2023.3/elev_bands/W5E5/')
+        prepro_base_url='.../oggm_v1.6/L3-L5_files/2023.3/centerlines/W5E5/')
+    workflow.execute_entity_task(
+        vascaling.terminus_profile_from_flowlines, gdirs)
     workflow.execute_entity_task(
         vascaling.mb_calibration_from_geodetic_mb, gdirs, overwrite_gdir=True)
     workflow.execute_entity_task(
         vascaling.run_reconstruction, gdirs, ys=1901, output_filesuffix='_vas')
 
-Use elevation band directories. The model describes the glacier as a whole
-and refuses glaciers with more than one flowline.
+Centerline and elevation band directories both work. The VAS mass balance
+model sets `uses_geometry = False` (OGGM PR #2042), so OGGM's calibration
+reads no flowlines and does not hand it one flowline at a time. The example
+uses centerlines.
 
 ## What is in the package
 
@@ -177,6 +181,29 @@ Both together gave 11.6 km2 in 1901, 11.4 in 1920, 10.8 in 1940 and
 -1027 kg m-2 yr-1 for 2000-2020, close to the observations. Neither alone was
 enough.
 
+### Terminus following the terrain (November 2026)
+
+This is Ben's idea, with OGGM's terrain instead of a fitted function.
+`terminus_profile_from_flowlines` stores the surface elevation along the main
+flowline and the downstream line (centerline or elevation band directories,
+same thing below the tongue). `TerminusProfile` then places the terminus
+there: the change in VAS length since the RGI date is applied as a distance
+along that line, anchored so that the RGI glacier sits on the RGI terminus.
+It does not extrapolate past the end of the downstream line, and the
+terminus never rises as the glacier grows. Every task that builds a model
+from a glacier directory uses the profile when the file is there, and falls
+back to Eq. (8) when it is not.
+
+Mapping the length change as a ratio (`s = s_0 L / L_0`, which is Eq. (8) on
+a straight line) was tried first and runs away on centerlines, because the
+flowline length and the scaling length differ (6.9 and 4.9 km for
+Hintereisferner). The difference in metres does not depend on which
+flowlines are used.
+
+What it does (W5E5, `informed_threestep`, three Alpine glaciers): the
+terminus now feeds back on the mass balance the way it should, and that
+breaks the start-area search. See open problem 3.
+
 ## Open problem 2: the temperature bias decides the reconstruction
 
 Hugonnet gives one number per glacier and the model has three parameters.
@@ -251,6 +278,42 @@ and `temp_all_solid` are equivalent to a temperature bias in this model, so
 the choice of OGGM's thresholds over the 2012 ones is part of the same
 question.
 
+## Open problem 3: the RGI area does not determine the 1901 glacier
+
+With the terminus following the terrain, the mass balance of the whole
+glacier follows its length: a long glacier has a low terminus and melts more.
+That is the restoring feedback a glacier should have, and it makes a
+reconstruction from 1901 ill-posed, as it is with OGGM's flowline model.
+
+- The area at the RGI date depends only weakly on the 1901 area, and not
+  monotonically. A century is several response times; the glacier forgets
+  where it started. For RGI60-11.00787 several 1901 areas end on the RGI
+  area.
+- The non-monotonicity comes from the time scales. The area follows the
+  volume within about a decade, the length (and with it the terminus, which
+  sets the whole mass balance) takes several decades. A large 1901 glacier
+  keeps its low terminus and very negative balance after its area has gone,
+  and overshoots.
+- Eq. (8) anchored on the start year escapes this only because every start
+  glacier sits on today's terminus, whatever its size. The map from 1901 to
+  the RGI date is then nearly linear: easy to invert, but without the
+  feedback.
+- The terminus at the RGI date is still not the observed one, because the
+  length lags the area. So the run does not have the geometry the mass
+  balance was calibrated on. Moving the anchor until the run hits the
+  observed terminus works for Hintereisferner (and the modelled 2000-2020
+  balance then lands within the Hugonnet error without being fitted). For
+  the two other glaciers the simple iteration jumps between two branches,
+  which is the instability Ben described.
+- OGGM's answer is to start from equilibrium with a temperature bias and
+  tune the bias. In VAS the equilibrium is cheap: the balance depends only on
+  the terminus height, so the zero-balance height gives the length (from the
+  profile) and the area (from scaling). Matching the RGI area that way is
+  unique for two of the three glaciers, not for the third, and for one of
+  them the RGI area barely depends on the bias.
+
+Scripts that produce all of this: `examples/terminus_experiments.py`.
+
 ## Comparison with Ben's MATLAB code
 
 Ben's current script (`matlab-code/model_cru_hugonnet.m`: CRU forcing,
@@ -314,18 +377,16 @@ Different in inputs and parameters (not tested numerically):
 
 ## Next steps
 
-1. Decide how the terminus elevation depends on length. Preferred: read it
-   from the OGGM flowline and downstream line instead of Eq. (8). Open points:
-   how the scaling length maps on the flowline length (for Hintereisferner
-   4.9 km from scaling, 5.6 km for the elevation band flowline), and what to
-   do with `max_hgt`, which is constant today and wrong for a glacier that
-   shrinks a lot.
-2. Anchor the terminus at the inventory date, so the run passes through the
-   observed area *and* the observed terminus. The outer iteration Ben found
-   too expensive costs milliseconds here.
-3. Decide how to set the temperature bias (open problem 2). The quick route
-   is OGGM's `informed_threestep`, which can be passed through
-   `mb_calibration_from_geodetic_mb` but has not been run with this model.
+1. Done: the terminus follows the OGGM flowline and downstream line
+   (`terminus_profile_from_flowlines`). Still open: `max_hgt`, which is
+   constant and wrong for a glacier that shrinks a lot.
+2. Decide how to initialise the 1901 glacier (open problem 3): equilibrium
+   with a temperature bias as in OGGM, a later start year, or more
+   observations. Then anchor the terminus at the inventory date on top
+   (dT and the anchor as two unknowns, area and terminus as two targets),
+   with a rule for glaciers that have several solutions or none.
+3. The temperature bias of the calibration (open problem 2). OGGM's
+   `informed_threestep` runs with this model; pass `temp_bias_file_path`.
 4. Re-check the three Alpine glaciers against Fig. 13 of the paper.
 5. Decide on `mb_calibration_dynamic_from_geodetic_mb`. With the current
    anchoring the modelled mass change is not monotonic in `melt_f` and the
@@ -343,14 +404,16 @@ Different in inputs and parameters (not tested numerically):
   Re-open existing directories without `from_prepro_level`.
 - `gdir.settings` falls back to the `mb_calib.json` of the prepro directory.
   An uncalibrated VAS glacier silently runs with OGGM's flowline parameters.
-- OGGM's calibration reads `inversion_flowlines` even though the VAS model
-  does not use them, and wraps the model in `MultipleFlowlineMassBalance`
-  when there is more than one flowline. Hence elevation band directories.
+- `uses_geometry = False` needs OGGM after PR #2042 (Nov 2026). With an
+  older OGGM the calibration wraps the model in `MultipleFlowlineMassBalance`
+  on centerline directories and fails.
 - `override_missing` in OGGM's geodetic calibration does not help when the
   period is absent from the Hugonnet table.
 - `utils.compile_run_output` rejects unknown variables and reads
   `water_level`, `glen_a` and `fs` unconditionally, which is why the VAS
   variables live in a separate file and those three are written as NaN.
+- In `vas_diagnostics`, `spec_mb` at time t is the mass balance of year
+  t-1 (the step that led to the state at t), and the first year is repeated.
 - The package tracks OGGM master and breaks when the API moves (last time:
   `read_pickle` -> `read_store`, October 2026). CI installs OGGM master.
 

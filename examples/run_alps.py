@@ -5,10 +5,11 @@ The workflow is OGGM's, with two differences: the mass balance model is
 of ice dynamics. No inversion is needed.
 
 The glacier directories have to provide `gridded_data` (for the glacier
-elevation range), `climate_historical` and `inversion_flowlines` -- OGGM's
-calibration reads the flowlines even though the VAS model does not use them.
-Prepro level 3 with elevation band flowlines gives all three, and gives one
-flowline per glacier, which is what the VAS model expects.
+elevation range), `climate_historical`, and `inversion_flowlines` plus
+`downstream_line` for the terminus profile. Prepro level 3 gives all of
+them, with centerlines or elevation bands. We use centerlines: below the
+present tongue both follow the same downstream line, above it the centerline
+follows the real main tongue when the glacier retreats.
 
 The key step is `run_reconstruction`: it picks the glacier area at `ys` so
 that the model reproduces the RGI area at the inventory date, then carries on
@@ -53,11 +54,17 @@ def run(ys=YS, dynamic_calibration=False):
     cfg.PATHS['working_dir'] = utils.mkdir(
         os.path.join(os.path.expanduser('~'), 'OGGM', 'vas_alps'))
 
-    # Elevation band flowlines, W5E5 climate, level 3
+    # Centerlines, W5E5 climate, level 3. The border of 160 grid points
+    # gives a downstream line long enough for the large past glaciers.
     gdirs = workflow.init_glacier_directories(
         RGI_IDS, from_prepro_level=3, prepro_border=160,
         prepro_base_url=('https://cluster.klima.uni-bremen.de/~oggm/gdirs/'
-                         'oggm_v1.6/L3-L5_files/2023.3/elev_bands/W5E5/'))
+                         'oggm_v1.6/L3-L5_files/2023.3/centerlines/W5E5/'))
+
+    # The terminus moves along the main flowline and the downstream line
+    # rather than along the straight line of Eq. (8) of Marzeion et al. (2012)
+    workflow.execute_entity_task(vascaling.terminus_profile_from_flowlines,
+                                 gdirs)
 
     # Calibrate melt_f, prcp_fac and temp_bias on Hugonnet et al. (2021)
     if dynamic_calibration:
@@ -103,20 +110,20 @@ def run(ys=YS, dynamic_calibration=False):
 if __name__ == '__main__':
     run()
 
-# Note on the terminus elevation, which limits how far back this can go.
+# Note on the terminus elevation.
 #
-# The VAS model ties the terminus elevation to the glacier length through
+# With the profile written by `terminus_profile_from_flowlines`, the change in
+# VAS length since the RGI date is applied along the main flowline and the
+# downstream line, and the terminus sits at the surface elevation there. It
+# does not extrapolate past the end of the downstream line. Without the
+# profile, the model falls back to Eq. (8) of Marzeion et al. (2012),
 #
 #     min_hgt = max_hgt + (length / length_0) * (min_hgt_0 - max_hgt)
 #
-# anchored on the initial state. That relation has no physical basis outside
-# the observed elevation range, and it is not bounded by it: a glacier
-# reconstructed as several times its present size gets a terminus far below
-# the lowest point of its DEM, and a glacier that shrinks a lot gets one close
-# to its summit. Both feed straight back into the melt.
+# anchored on the start year, which is not bounded by the terrain and puts
+# the terminus of a large past glacier far below the valley floor.
 #
-# The practical consequence is that for early start years the modelled mass
-# change stops being monotonic in melt_f, so the dynamic calibration can fail
-# to bracket the observations (it says so rather than returning a bad answer).
-# Clipping the terminus to the glacier's DEM range restores monotonicity, but
-# that is a change to the published model, so it is not done here.
+# With the profile the terminus feeds back on the mass balance as it should,
+# and the start-area search is no longer well posed: several 1901 areas can
+# end on the RGI area, and the terminus at the RGI date is not the observed
+# one. See "Open problem 3" in the README and examples/terminus_experiments.py.

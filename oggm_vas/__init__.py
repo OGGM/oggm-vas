@@ -6,6 +6,12 @@ _doc = ('The VAS model output, with the specific mass balance, the terminus '
         'of the geometry stored in `model_diagnostics`.')
 cfg.add_to_basenames('vas_diagnostics', 'vas_diagnostics.nc', docstr=_doc)
 
+_doc = ('The surface elevation along the main flowline and the downstream '
+        'line, used to place the VAS terminus as a function of glacier '
+        'length.')
+cfg.add_to_basenames('vas_terminus_profile', 'vas_terminus_profile.json',
+                     docstr=_doc)
+
 from importlib.metadata import version, PackageNotFoundError
 try:
     __version__ = version('oggm-vas')
