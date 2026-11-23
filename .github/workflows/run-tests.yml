@@ -1,0 +1,35 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - master
+      - dev
+  pull_request:
+    branches:
+      - master
+      - dev
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test on ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        container:
+          # Same pinned environment OGGM itself tests against
+          - ghcr.io/oggm/untested_base:20260223
+          # Rolling python, allowed to fail
+          - ghcr.io/oggm/untested_base:py3.14
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    continue-on-error: ${{ contains(matrix.container, 'py3') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Fix Git-Permissions
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Test
+        timeout-minutes: 30
+        run: ./ci/run_tests.sh
