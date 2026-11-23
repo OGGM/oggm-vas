@@ -197,35 +197,48 @@ def scaling_length(area_m2, glacier_type='Glacier'):
 
 
 @entity_task(log, writes=['vas_terminus_profile'])
-def terminus_profile_from_flowlines(gdir):
-    """Store the surface elevation along the main flowline and the
+def terminus_profile_from_flowlines(gdir, use_bed=True):
+    """Store the elevation profile along the main flowline and the
     downstream line, for :py:class:`TerminusProfile`.
 
-    The profile is the one OGGM's `init_present_time_glacier` builds for the
-    main flowline: the glacier surface down to the RGI terminus, then the
-    terrain along the downstream line. No inversion is needed.
+    Below the RGI terminus the profile is the terrain along the downstream
+    line. Along the glacier it is the bed (surface minus the ice thickness
+    from OGGM's inversion), since that is where the terminus of a retreating
+    glacier sits, or the glacier surface with `use_bed=False`.
 
     Parameters
     ----------
     gdir : :py:class:`oggm.GlacierDirectory`
+    use_bed : bool
+        use the bed along the glacier (needs `inversion_output`, as in the
+        prepro level 3 directories). Default: True
     """
     fl = gdir.read_store('inversion_flowlines')[-1]
     dx_m = float(fl.dx * gdir.grid.dx)
-    surface_h = np.asarray(fl.surface_h, dtype=float)
-    glacier_length_m = len(surface_h) * dx_m
+    profile_h = np.asarray(fl.surface_h, dtype=float)
+    glacier_length_m = len(profile_h) * dx_m
+    if use_bed:
+        if not gdir.has_file('inversion_output'):
+            raise InvalidWorkflowError('terminus_profile_from_flowlines: '
+                                       'use_bed needs the inversion output')
+        thick = gdir.read_store('inversion_output')[-1]['thick']
+        profile_h = profile_h - thick
     if not gdir.is_tidewater:
         dic_ds = gdir.read_store('downstream_line')
-        surface_h = np.append(surface_h, dic_ds['surface_h'])
+        profile_h = np.append(profile_h, dic_ds['surface_h'])
 
     gdir.write_json({'dx_m': dx_m,
                      'glacier_length_m': glacier_length_m,
-                     'surface_h': [float(h) for h in surface_h]},
+                     'along_glacier': 'bed' if use_bed else 'surface',
+                     'profile_h': [float(h) for h in profile_h]},
                     'vas_terminus_profile')
 
 
 class TerminusProfile(object):
     """Terminus elevation as a function of glacier length, read off the
-    surface profile along the main flowline and downstream line.
+    elevation profile along the main flowline and downstream line (the bed
+    or the surface along the glacier, see
+    :py:func:`terminus_profile_from_flowlines`).
 
     Replaces Eq. (8) of Marzeion et al. (2012),
     `z_term = z_max + (L / L_0) (z_term_0 - z_max)`, which moves the terminus
@@ -248,13 +261,13 @@ class TerminusProfile(object):
     made monotonic so the terminus never rises as the glacier grows.
     """
 
-    def __init__(self, surface_h, dx_m, glacier_length_m, length_m_ref,
+    def __init__(self, profile_h, dx_m, glacier_length_m, length_m_ref,
                  min_hgt_ref, max_hgt=None):
         """
         Parameters
         ----------
-        surface_h : array
-            surface elevation along the flowline, from the head down [m asl.]
+        profile_h : array
+            elevation along the flowline, from the head down [m asl.]
         dx_m : float
             grid spacing of the profile [m]
         glacier_length_m : float
@@ -266,15 +279,15 @@ class TerminusProfile(object):
         max_hgt : float, optional
             upper limit to the terminus elevation [m asl.]
         """
-        surface_h = np.minimum.accumulate(np.asarray(surface_h, dtype=float))
+        profile_h = np.minimum.accumulate(np.asarray(profile_h, dtype=float))
         # elevations sit at cell centres
-        self.distance_m = (np.arange(len(surface_h)) + 0.5) * dx_m
+        self.distance_m = (np.arange(len(profile_h)) + 0.5) * dx_m
         self.glacier_length_m = glacier_length_m
         self.length_m_ref = length_m_ref
         self.max_hgt = max_hgt
-        self.surface_h = (surface_h + min_hgt_ref
+        self.profile_h = (profile_h + min_hgt_ref
                           - np.interp(glacier_length_m, self.distance_m,
-                                      surface_h))
+                                      profile_h))
 
     @classmethod
     def from_gdir(cls, gdir):
@@ -286,7 +299,7 @@ class TerminusProfile(object):
             return None
         d = gdir.read_json('vas_terminus_profile')
         min_hgt, max_hgt = get_min_max_elevation(gdir)
-        return cls(d['surface_h'], d['dx_m'], d['glacier_length_m'],
+        return cls(d['profile_h'], d['dx_m'], d['glacier_length_m'],
                    scaling_length(gdir.rgi_area_m2, gdir.glacier_type),
                    min_hgt, max_hgt=max_hgt)
 
@@ -294,7 +307,7 @@ class TerminusProfile(object):
         """Terminus elevation [m asl.] for a glacier of VAS length
         `length_m` [m]."""
         s = self.glacier_length_m * length_m / self.length_m_ref
-        z = float(np.interp(s, self.distance_m, self.surface_h))
+        z = float(np.interp(s, self.distance_m, self.profile_h))
         if self.max_hgt is not None:
             z = min(z, self.max_hgt)
         return z
@@ -302,7 +315,7 @@ class TerminusProfile(object):
     @property
     def lowest_hgt(self):
         """The lowest terminus elevation the profile can give [m asl.]."""
-        return float(self.surface_h[-1])
+        return float(self.profile_h[-1])
 
 
 def get_scaling_constant(gdirs):

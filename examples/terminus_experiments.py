@@ -10,7 +10,9 @@ terminus options are:
 - ``eq8_rgi``: Eq. (8) anchored on the RGI glacier (the paper's text),
   unbounded below the tongue apart from a floor far below;
 - ``terrain``: the terminus follows the flowline and downstream line
-  (``TerminusProfile``), anchored on the RGI glacier.
+  (``TerminusProfile``), anchored on the RGI glacier. Along the glacier this
+  is now the bed; the handover page of commit 9f6a342 was made with the
+  surface (``terminus_profile_from_flowlines(gdir, use_bed=False)``).
 
 For each glacier and option the file holds:
 

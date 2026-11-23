@@ -94,7 +94,7 @@ Design decisions for the port:
 
 ### State (Nov 2026)
 
-Branch `dev`. `pytest oggm_vas` is green: 29 tests, ~45 s, no downloads.
+Branch `dev`. `pytest oggm_vas` is green: 30 tests, ~45 s, no downloads.
 README.md is the detailed handover note (open problems 1-3, next steps) and
 is kept up to date; read it first.
 
@@ -106,7 +106,8 @@ Working:
   elevation band dirs both calibrate; use elevation bands for the profile. `informed_threestep` runs (needs
   `temp_bias_file_path`).
 - `terminus_profile_from_flowlines` + `TerminusProfile`: the terminus
-  follows the main flowline surface and the downstream line. The VAS length
+  follows the main flowline bed (inversion; `use_bed=False` for the
+  surface, which the handover page used) and the downstream line. The VAS length
   is mapped as a ratio, s = s_0 L/L_0 (Eq. (8) on a straight line), anchored
   on the DEM minimum at the RGI date, monotonic, clamped at the end of the
   line. Used automatically when `vas_terminus_profile.json` exists; otherwise
@@ -134,6 +135,11 @@ breaks the same way OGGM's does:
   Iterating the anchor works for HEF (12.5 km2 in 1901, run MB within the
   Hugonnet error) and oscillates between two branches for the other two -
   Ben's instability.
+
+The bed instead of the surface along the glacier helps a little (00746
+down to one root), Kesselwandferner keeps three. Qiang Sun's report (Nov
+2026, HEF only, Oerlemans exponential fitted to the same profile, difference
+mapping) reaches the same conclusions; see README.
 
 Not decided: how to initialise, how to pick among several solutions. An
 OGGM-style equilibrium spin-up with a temperature bias was tried and judged

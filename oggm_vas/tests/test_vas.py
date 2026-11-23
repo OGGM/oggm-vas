@@ -624,7 +624,10 @@ class TestVAScalingModel(unittest.TestCase):
         gdir = self._calibrated_gdir()
         centerlines.compute_downstream_line(gdir)
         centerlines.compute_downstream_bedshape(gdir)
-        vascaling.terminus_profile_from_flowlines(gdir)
+        # no inversion in this directory
+        with pytest.raises(oggm.exceptions.InvalidWorkflowError):
+            vascaling.terminus_profile_from_flowlines(gdir)
+        vascaling.terminus_profile_from_flowlines(gdir, use_bed=False)
         tp = vascaling.TerminusProfile.from_gdir(gdir)
 
         min_hgt, max_hgt = vascaling.get_min_max_elevation(gdir)
@@ -650,6 +653,25 @@ class TestVAScalingModel(unittest.TestCase):
         # glacier is still longer than the scaling length of its area.
         np.testing.assert_allclose(ds.min_hgt.values,
                                    [tp(l) for l in ds.length_m.values])
+
+    def test_terminus_profile_bed(self):
+        """Along the glacier the profile is the bed, below it the
+        downstream line."""
+        gdir = self._gdir()
+        centerlines.compute_downstream_line(gdir)
+        centerlines.compute_downstream_bedshape(gdir)
+        fl = gdir.read_store('inversion_flowlines')[-1]
+        # a made-up inversion: 100 m of ice everywhere but the last cell
+        thick = np.full(fl.nx, 100.)
+        thick[-1] = 0.
+        gdir.write_store([{'thick': thick}], 'inversion_output')
+        vascaling.terminus_profile_from_flowlines(gdir)
+        d = gdir.read_json('vas_terminus_profile')
+        assert d['along_glacier'] == 'bed'
+        dic_ds = gdir.read_store('downstream_line')
+        np.testing.assert_allclose(d['profile_h'],
+                                   np.append(fl.surface_h - thick,
+                                             dic_ds['surface_h']))
 
     def test_fixed_geometry_mass_balance(self):
         """The fixed geometry series must match the mass balance model."""

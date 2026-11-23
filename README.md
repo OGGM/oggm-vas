@@ -33,7 +33,7 @@ This README is a handover note. It describes where the port stands
 
     pip install git+https://github.com/OGGM/oggm.git   # OGGM master
     pip install -e ".[tests]"
-    pytest oggm_vas                                    # 29 tests, ~45 s
+    pytest oggm_vas                                    # 30 tests, ~45 s
     python examples/run_alps.py                        # three Alpine glaciers
 
 The tests run on OGGM's sample data (Hintereisferner, HISTALP) and need no
@@ -144,7 +144,7 @@ observed (RGI) one. Three symptoms:
 ### What Ben Marzeion says (October 2026)
 
 Ben knows the problem. Moritz ran into it during the thesis, and Ben's
-current MATLAB code has it too ("moved, not solved"). What he tried:
+current MATLAB code has it too ("moved, not solved"). What Ben tried:
 
 - Anchoring `L_0` at the inventory date properly needs the model length at
   that date, which depends on the run itself because of the response time. So
@@ -154,7 +154,7 @@ current MATLAB code has it too ("moved, not solved"). What he tried:
   were in equilibrium then: the glacier comes out too short, hence too steep,
   and the iteration becomes unstable (steep glacier -> much lower terminus in
   1901 -> much more melt).
-- His idea for a real fix: replace the straight line of Eq. (8) by a simple
+- Ben's idea for a real fix: replace the straight line of Eq. (8) by a simple
   function for the bed profile, steep at the top and flat at the bottom
   (Oerlemans uses an exponential; doi 10.1016/j.mex.2020.10117, as quoted in
   the chat and possibly truncated, uses a sum of two exponentials), fitted on
@@ -185,8 +185,12 @@ enough.
 ### Terminus following the terrain (November 2026)
 
 This is Ben's idea, with OGGM's terrain instead of a fitted function.
-`terminus_profile_from_flowlines` stores the surface elevation along the main
-flowline and the downstream line. `TerminusProfile` then places the
+`terminus_profile_from_flowlines` stores the elevation along the main
+flowline and the downstream line: the bed (surface minus OGGM's inversion
+thickness) along the glacier, since that is where a retreating terminus
+sits, and the terrain below it (`use_bed=False` keeps the surface along the
+glacier; prepro level 3 directories have the inversion). The bed is made
+monotonic, so overdeepenings are flattened. `TerminusProfile` then places the
 terminus there: the VAS length relative to the RGI glacier is mapped onto
 the distance along that line (`s = s_0 L / L_0`), anchored so that the RGI
 glacier sits on the RGI terminus. On a straight line this is Eq. (8).
@@ -207,6 +211,40 @@ way down the line instead of at the top.
 What it does (W5E5, `informed_threestep`, three Alpine glaciers): the
 terminus now feeds back on the mass balance, and that breaks the
 start-area search. See open problem 3.
+
+Bed against surface along the glacier (the experiments and the handover
+page of commit 9f6a342 used the surface; the bed is the default since):
+
+| glacier          | along glacier | 1901 areas matching RGI (km2) | terminus at RGI date vs observed | MB 2000-2019 (obs) |
+|------------------|---------------|-------------------------------|----------------------------------|--------------------|
+| Hintereisferner  | surface       | 17.5                          | -53 m                            | -1254 (-1100)      |
+|                  | bed           | 16.2                          | -42 m                            | -1214              |
+| Kesselwandferner | surface       | 0.79, 6.1, 54.9               | +105 m                           | -234 (-515)        |
+|                  | bed           | 1.17, 6.1, 54.7               | +37 m                            | -404               |
+| RGI60-11.00746   | surface       | 6.2, 12.8, 26.0               | -77 m                            | -906 (-708)        |
+|                  | bed           | 25.4                          | -71 m                            | -887               |
+
+The run uses the root the search finds (the smallest for Kesselwandferner,
+the largest for 00746). The bed moves every run a little towards the
+observations and removes two roots for 00746, but does not change the
+picture of open problem 3.
+
+### Qiang Sun's exponential bed (November 2026)
+
+Qiang Sun tested, in parallel and on Hintereisferner only, the Oerlemans
+form Ben suggested: `b(x) = z_base + a exp(-x / l)` fitted by least squares
+to the same elevation band profile (inversion bed along the glacier,
+downstream line below), within -2.5 / +3 km of the tongue, then shifted to
+pass through the RGI terminus at the scaling length. The length is mapped
+as a difference (`s - s_0 = L - L_0`). The report's three cases are our three
+options: CTRL = Eq. (8) on the start glacier, EXP1 = Eq. (8) on the RGI
+glacier, EXP2 = terrain. Same findings: EXP1 breaks the start-area search
+(area at the RGI date not monotonic in the start area), all three match the
+RGI area but not the RGI length and terminus, and the three histories
+differ widely (EXP2 12.8 km2 in 1901). Compared with the raw profile here,
+the fit is smooth and has a natural floor (`z_base`) but needs a fitting
+window and is 140 m off over the whole profile; with only Hintereisferner
+(one root in our runs too) the non-uniqueness does not show.
 
 ## Open problem 2: the temperature bias decides the reconstruction
 
@@ -381,9 +419,10 @@ Different in inputs and parameters (not tested numerically):
 
 ## Next steps
 
-1. Done: the terminus follows the OGGM flowline and downstream line
+1. Done: the terminus follows the OGGM flowline bed and downstream line
    (`terminus_profile_from_flowlines`). Still open: `max_hgt`, which is
-   constant and wrong for a glacier that shrinks a lot.
+   constant and wrong for a glacier that shrinks a lot, and whether a
+   smooth fit (Qiang Sun's exponential) is better than the raw profile.
 2. Decide how to initialise the 1901 glacier (open problem 3): what
    constrains it beyond the RGI area, and a rule for glaciers that have
    several solutions or none. Then match the terminus at the inventory date
