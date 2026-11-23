@@ -94,7 +94,7 @@ Design decisions for the port:
 
 ### State (Nov 2026)
 
-Branch `dev`. `pytest oggm_vas` is green: 30 tests, ~45 s, no downloads.
+Branch `dev`. `pytest oggm_vas` is green: 31 tests, ~45 s, no downloads.
 README.md is the detailed handover note (open problems 1-3, next steps) and
 is kept up to date; read it first.
 
@@ -132,9 +132,12 @@ breaks the same way OGGM's does:
 - Eq. (8) anchored at the start year only escapes this because every start
   glacier sits on today's terminus: a near-linear, invertible, unphysical map.
 - the terminus at the RGI date is not the observed one (length lags area).
-  Iterating the anchor works for HEF (12.3 km2 in 1901) and, with the bed
-  profile, for 00746 (run MB within the Hugonnet error for both); for KWF
-  it oscillates between two branches - Ben's instability.
+  Iterating the anchor (bed profile, smallest solution) works for all
+  three, run MB within the Hugonnet error, but KWF then grows from 1.5 km2
+  in 1901. Without a fixed root rule it oscillated between branches - Ben's
+  instability.
+- `find_start_area_from_model` scans for all solutions and raises on
+  several unless `multiple_solutions='smallest'|'largest'`.
 
 The bed instead of the surface along the glacier helps (00746 down to one
 root and the terminus match now works for it), Kesselwandferner keeps three. Qiang Sun's report (Nov

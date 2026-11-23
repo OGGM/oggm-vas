@@ -80,8 +80,11 @@ def run(ys=YS, dynamic_calibration=False):
               % (gdir.rgi_id, gdir.settings['melt_f'],
                  gdir.settings['prcp_fac'], gdir.settings['temp_bias']))
 
-    # Reconstruct the whole record, passing through the observed area
+    # Reconstruct the whole record, passing through the observed area. With
+    # the terrain profile several 1901 areas can reproduce it (three for
+    # Kesselwandferner, README open problem 3); take the smallest for now.
     workflow.execute_entity_task(vascaling.run_reconstruction, gdirs, ys=ys,
+                                 multiple_solutions='smallest',
                                  output_filesuffix='_vas')
 
     # The geometry goes to `model_diagnostics`, which OGGM's own compilation

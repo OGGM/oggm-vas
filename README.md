@@ -33,7 +33,7 @@ This README is a handover note. It describes where the port stands
 
     pip install git+https://github.com/OGGM/oggm.git   # OGGM master
     pip install -e ".[tests]"
-    pytest oggm_vas                                    # 30 tests, ~45 s
+    pytest oggm_vas                                    # 31 tests, ~45 s
     python examples/run_alps.py                        # three Alpine glaciers
 
 The tests run on OGGM's sample data (Hintereisferner, HISTALP) and need no
@@ -334,13 +334,19 @@ test glaciers (elevation bands, GSWP3-W5E5, `informed_threestep`):
   size feedback between start states.
 - Eq. (8) anchored on the RGI glacier (the paper's text): the strongest
   feedback. Two 1901 areas reproduce the RGI area for Hintereisferner and
-  Kesselwandferner, none for RGI60-11.00746. Our start-area search assumes
-  one solution and fails for two of the three.
+  Kesselwandferner, none for RGI60-11.00746.
 - Terrain profile anchored on the RGI glacier: the same feedback, weaker
   and bounded. With the bed along the glacier: one solution for
   Hintereisferner and RGI60-11.00746, three for Kesselwandferner (with the
-  surface: three for 00746 too). The search returns whichever it brackets
-  first.
+  surface: three for 00746 too).
+
+`find_start_area_from_model` now scans the start areas for every sign
+change of the area error and raises when it finds more than one solution,
+unless told to take the `'smallest'` or `'largest'` (`multiple_solutions`).
+It used to widen its bracket upwards from the RGI area only, so it missed
+solutions below the RGI area (Eq. (8) on the RGI glacier for
+Hintereisferner) and returned whichever it bracketed first. The examples
+take the smallest, which is arbitrary.
 
 Where this comes from:
 
@@ -354,12 +360,16 @@ Where this comes from:
   length lags the area, so the run does not have the geometry the mass
   balance was calibrated on. Moving the anchor (the length that sits on the
   observed terminus) until the run also hits the observed terminus works for
-  Hintereisferner (anchor 1.08 L_0, 12.3 km2 in 1901, -1077 against
-  -1100 +- 172) and, with the bed, for 00746 (1.03 L_0, 18.9 km2, -696
-  against -708 +- 123); both balances land within the Hugonnet error
-  without being fitted. For Kesselwandferner the terminus error jumps over
-  zero where the start-area search changes branch, and there is no match
-  (with the surface, 00746 behaved the same).
+  all three with the bed profile and the smallest solution:
+  Hintereisferner 1.08 L_0, 12.3 km2 in 1901, -1077 against -1100 +- 172;
+  00746 1.03 L_0, 19.3 km2, -705 against -708 +- 123 (terminus 5 m off);
+  Kesselwandferner 0.93 L_0, 1.5 km2, -535 against -515 +- 136. All three
+  balances land within the Hugonnet error without being fitted, but the
+  Kesselwandferner one grows from 1.5 to 4 km2, which seems unlikely, and
+  whether its two other solutions allow a match is not checked. Before the
+  search had a fixed rule it switched between solutions as the anchor
+  moved, and the terminus error jumped over zero (Kesselwandferner, and
+  00746 with the surface profile).
 
 ## Comparison with Ben's MATLAB code
 

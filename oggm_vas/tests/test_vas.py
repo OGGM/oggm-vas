@@ -548,6 +548,35 @@ class TestVAScalingModel(unittest.TestCase):
                                       max_area_factor=1.0)
         assert 'reproduces' in str(err.value)
 
+    def test_find_start_area_several_solutions(self):
+        """All solutions are found; several raise unless one is chosen."""
+        class FakeRef:
+            year_0 = 2004
+            area_m2_0 = 1e6
+
+        class FakeStart:
+            def __init__(self, area_m2):
+                self.a = area_m2 / 1e6
+
+            def run_and_compare(self, model_ref, **kwargs):
+                # area error with three roots, at 0.5, 2 and 8 km2
+                return -(self.a - 0.5) * (self.a - 2) * (self.a - 8)
+
+        orig = vascaling.core._start_model
+        vascaling.core._start_model = lambda ref, a, ys, **kw: FakeStart(a)
+        try:
+            ref = FakeRef()
+            with pytest.raises(RuntimeError) as err:
+                vascaling.find_start_area_from_model(ref, 1901)
+            assert '3 start areas' in str(err.value)
+            small = vascaling.find_start_area_from_model(
+                ref, 1901, multiple_solutions='smallest')
+            large = vascaling.find_start_area_from_model(
+                ref, 1901, multiple_solutions='largest')
+        finally:
+            vascaling.core._start_model = orig
+        np.testing.assert_allclose([small, large], [0.5e6, 8e6], rtol=1e-4)
+
     def test_run_reconstruction(self):
         """The reconstruction must pass through the observed area."""
         gdir = self._calibrated_gdir()

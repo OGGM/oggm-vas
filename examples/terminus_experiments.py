@@ -128,7 +128,8 @@ for gd in gdirs:
     for name in OPTIONS:
         try:
             A = c.find_start_area_from_model(refs[name], YS,
-                                             target_yr=target)
+                                             target_yr=target,
+                                             multiple_solutions='smallest')
             ds = c._start_model(refs[name], A, YS).run_until_and_store(YE)
             rec[name], summ[name] = series(ds), summary(ds, target)
         except Exception as e:
@@ -143,7 +144,8 @@ for gd in gdirs:
         tp.length_m_ref = fac * L0
         try:
             A = c.find_start_area_from_model(refs['terrain'], YS,
-                                             target_yr=target)
+                                             target_yr=target,
+                                             multiple_solutions='smallest')
         except Exception:
             return None, np.nan
         ds = c._start_model(refs['terrain'], A, YS).run_until_and_store(YE)

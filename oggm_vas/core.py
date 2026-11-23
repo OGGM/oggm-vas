@@ -687,15 +687,19 @@ def _start_model(model_ref, area_m2_start, year_start,
 def find_start_area_from_model(model_ref, year_start, target_yr=None,
                                adjust_term_elev=False,
                                instant_geometry_change=False,
-                               max_area_factor=100, rtol=1e-4):
+                               max_area_factor=100, rtol=1e-4,
+                               multiple_solutions='raise', n_scan=40):
     """Find the glacier area at `year_start` that reproduces the reference area.
 
-    The modelled area at `target_yr` grows monotonically with the area the
-    glacier started from, so this is a root finding problem, not a
-    minimisation. The bracket is widened until it contains the solution.
-    That matters for early start years and strongly negative mass balances: a
-    glacier that has since lost most of its mass needs a start area many times
-    its present one, and a fixed bracket silently returns its own bound.
+    This is a root finding problem: the area error at `target_yr` as a
+    function of the start area. It is not monotonic in general. When the
+    terminus is tied to the reference glacier (a terminus profile, or
+    `adjust_term_elev`), a larger start glacier reaches lower and melts
+    more, and several start areas, or none, can reproduce the reference
+    area. So the start areas between 1 % and `max_area_factor` times the
+    reference area are scanned for sign changes of the error (`n_scan` areas,
+    evenly spaced in log), and each bracket is solved with Brent's method.
+    Two solutions closer than the scan spacing are missed.
 
     Parameters
     ----------
@@ -718,6 +722,11 @@ def find_start_area_from_model(model_ref, year_start, target_yr=None,
         area. Raises rather than returning a silent non-match.
     rtol : float, optional
         the relative area error that counts as a match
+    multiple_solutions : str, optional
+        what to do when several start areas reproduce the reference area:
+        'raise' (default), 'smallest' or 'largest'
+    n_scan : int, optional
+        number of start areas in the scan
 
     Returns
     -------
@@ -730,10 +739,13 @@ def find_start_area_from_model(model_ref, year_start, target_yr=None,
     if year_start >= target_yr:
         raise InvalidParamsError(f'year_start ({year_start}) must be before '
                                  f'the target year ({target_yr}).')
+    if multiple_solutions not in ['raise', 'smallest', 'largest']:
+        raise InvalidParamsError('multiple_solutions must be one of raise, '
+                                 f'smallest, largest: {multiple_solutions}')
 
     def _rel_area_error(area_m2_start):
-        """Signed relative area error at the target year. Decreases
-        monotonically with the start area."""
+        """Signed relative area error at the target year (positive when the
+        modelled glacier is too small)."""
         model = _start_model(model_ref, area_m2_start, year_start,
                              adjust_term_elev=adjust_term_elev)
         return model.run_and_compare(
@@ -741,29 +753,32 @@ def find_start_area_from_model(model_ref, year_start, target_yr=None,
 
     # a glacier this small cannot end up bigger than the reference one
     area_lo = 100.
-    err_lo = _rel_area_error(area_lo)
-    if err_lo < 0:
+    if _rel_area_error(area_lo) < 0:
         raise RuntimeError(
             f'Even a {area_lo:.0f} m2 glacier in {year_start} ends up larger '
             f'than the reference area in {target_yr}: the mass balance is too '
             f'positive for a reconstruction.')
 
-    # widen the bracket until it contains the solution
-    area_hi = model_ref.area_m2_0
-    err_hi = _rel_area_error(area_hi)
-    factor = 2.
-    while err_hi > 0:
-        if factor > max_area_factor:
-            raise RuntimeError(
-                f'No start area below {max_area_factor:.0f} x the reference '
-                f'area reproduces the {target_yr} area from {year_start} '
-                f'(best relative area error {err_hi:.3f}). The mass balance '
-                'is likely too negative, or the start year too early.')
-        area_hi = factor * model_ref.area_m2_0
-        err_hi = _rel_area_error(area_hi)
-        factor *= 2.
-
-    area_start = brentq(_rel_area_error, area_lo, area_hi, xtol=1.)
+    areas = np.geomspace(0.01, max_area_factor, n_scan) * model_ref.area_m2_0
+    areas = np.append(area_lo, areas[areas > area_lo])
+    errs = np.array([_rel_area_error(a) for a in areas])
+    idx = np.where(np.sign(errs[:-1]) != np.sign(errs[1:]))[0]
+    if len(idx) == 0:
+        raise RuntimeError(
+            f'No start area below {max_area_factor:.0f} x the reference '
+            f'area reproduces the {target_yr} area from {year_start} '
+            f'(smallest relative area error {np.min(np.abs(errs)):.3f}). '
+            'The mass balance may be too negative, or the start year too '
+            'early.')
+    roots = [brentq(_rel_area_error, areas[i], areas[i + 1], xtol=1.)
+             for i in idx]
+    if len(roots) > 1 and multiple_solutions == 'raise':
+        raise RuntimeError(
+            f'{len(roots)} start areas in {year_start} reproduce the '
+            f'{target_yr} area: '
+            + ', '.join(f'{r * 1e-6:.3f}' for r in roots) + ' km2. Choose '
+            "one with multiple_solutions='smallest' or 'largest'.")
+    area_start = max(roots) if multiple_solutions == 'largest' else roots[0]
 
     err = abs(_rel_area_error(area_start))
     if err > rtol:
@@ -777,7 +792,8 @@ def find_start_area_from_model(model_ref, year_start, target_yr=None,
 @entity_task(log)
 def find_start_area(gdir, year_start=1851, target_yr=None,
                     adjust_term_elev=False, instant_geometry_change=False,
-                    max_area_factor=100, rtol=1e-4, **kwargs):
+                    max_area_factor=100, rtol=1e-4,
+                    multiple_solutions='raise', **kwargs):
     """Find the glacier area at `year_start` that reproduces the RGI area.
 
     The glacier is integrated from `year_start` to the RGI date and the start
@@ -800,6 +816,10 @@ def find_start_area(gdir, year_start=1851, target_yr=None,
         whether to neglect the response time scales, default = False
     max_area_factor : float, optional
         the largest start area to consider, as a multiple of the RGI area
+    multiple_solutions : str, optional
+        what to do when several start areas reproduce the RGI area: 'raise'
+        (default), 'smallest' or 'largest'. See
+        :py:func:`find_start_area_from_model`.
     rtol : float, optional
         the relative area error that counts as a match
     **kwargs
@@ -818,7 +838,8 @@ def find_start_area(gdir, year_start=1851, target_yr=None,
         model_ref, year_start, target_yr=target_yr,
         adjust_term_elev=adjust_term_elev,
         instant_geometry_change=instant_geometry_change,
-        max_area_factor=max_area_factor, rtol=rtol)
+        max_area_factor=max_area_factor, rtol=rtol,
+        multiple_solutions=multiple_solutions)
 
 
 @entity_task(log)
@@ -1043,7 +1064,8 @@ def run_reconstruction(gdir, ys=None, ye=None, target_yr=None,
                        climate_input_filesuffix='', output_filesuffix='',
                        bias=0, adjust_term_elev=False,
                        instant_geometry_change=False,
-                       max_area_factor=100, rtol=1e-4, **kwargs):
+                       max_area_factor=100, rtol=1e-4,
+                       multiple_solutions='raise', **kwargs):
     """Reconstruct the glacier over the whole available climate record.
 
     This is one continuous run that passes through the observed geometry: the
@@ -1084,6 +1106,10 @@ def run_reconstruction(gdir, ys=None, ye=None, target_yr=None,
         whether to neglect the response time scales, default = False
     max_area_factor : float, optional
         the largest start area to consider, as a multiple of the RGI area
+    multiple_solutions : str, optional
+        what to do when several start areas reproduce the RGI area: 'raise'
+        (default), 'smallest' or 'largest'. See
+        :py:func:`find_start_area_from_model`.
     rtol : float, optional
         the relative area error that counts as a match
     **kwargs
@@ -1119,7 +1145,8 @@ def run_reconstruction(gdir, ys=None, ye=None, target_yr=None,
         model_ref, ys, target_yr=target_yr,
         adjust_term_elev=adjust_term_elev,
         instant_geometry_change=instant_geometry_change,
-        max_area_factor=max_area_factor, rtol=rtol)
+        max_area_factor=max_area_factor, rtol=rtol,
+        multiple_solutions=multiple_solutions)
 
     model = _start_model(model_ref, area_m2_start, ys,
                          adjust_term_elev=adjust_term_elev)
@@ -1145,7 +1172,8 @@ def run_reconstruction(gdir, ys=None, ye=None, target_yr=None,
 def _dmdtda_from_reconstruction(gdir, mb_model, yr0, yr1, ys, target_yr,
                                 adjust_term_elev=False,
                                 instant_geometry_change=False,
-                                max_area_factor=100, rtol=1e-4):
+                                max_area_factor=100, rtol=1e-4,
+                                multiple_solutions='raise'):
     """Geodetic mass balance of a reconstructed glacier, in kg m-2 yr-1.
 
     Same convention as OGGM's dynamic melt_f calibration: the mass change
@@ -1157,7 +1185,8 @@ def _dmdtda_from_reconstruction(gdir, mb_model, yr0, yr1, ys, target_yr,
         model_ref, ys, target_yr=target_yr,
         adjust_term_elev=adjust_term_elev,
         instant_geometry_change=instant_geometry_change,
-        max_area_factor=max_area_factor, rtol=rtol)
+        max_area_factor=max_area_factor, rtol=rtol,
+        multiple_solutions=multiple_solutions)
     model = _start_model(model_ref, area_m2_start, ys,
                          adjust_term_elev=adjust_term_elev)
 
@@ -1181,6 +1210,7 @@ def mb_calibration_dynamic_from_geodetic_mb(gdir, *,
                                             adjust_term_elev=False,
                                             instant_geometry_change=False,
                                             max_area_factor=100, rtol=1e-4,
+                                            multiple_solutions='raise',
                                             write_to_gdir=True,
                                             overwrite_gdir=False,
                                             **kwargs):
@@ -1233,6 +1263,10 @@ def mb_calibration_dynamic_from_geodetic_mb(gdir, *,
         whether to neglect the response time scales
     max_area_factor : float, optional
         the largest start area to consider, as a multiple of the RGI area
+    multiple_solutions : str, optional
+        what to do when several start areas reproduce the RGI area: 'raise'
+        (default), 'smallest' or 'largest'. See
+        :py:func:`find_start_area_from_model`.
     rtol : float, optional
         the relative area error that counts as a geometry match
     write_to_gdir : bool, optional
@@ -1313,7 +1347,8 @@ def mb_calibration_dynamic_from_geodetic_mb(gdir, *,
             gdir, _mb_model(melt_f), yr0, yr1, ys, target_yr,
             adjust_term_elev=adjust_term_elev,
             instant_geometry_change=instant_geometry_change,
-            max_area_factor=max_area_factor, rtol=rtol)
+            max_area_factor=max_area_factor, rtol=rtol,
+            multiple_solutions=multiple_solutions)
         state['area_m2_start'] = area_m2_start
         state['dmdtda'] = dmdtda
         return dmdtda - ref_mb
