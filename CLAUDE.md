@@ -132,12 +132,12 @@ breaks the same way OGGM's does:
 - Eq. (8) anchored at the start year only escapes this because every start
   glacier sits on today's terminus: a near-linear, invertible, unphysical map.
 - the terminus at the RGI date is not the observed one (length lags area).
-  Iterating the anchor works for HEF (12.5 km2 in 1901, run MB within the
-  Hugonnet error) and oscillates between two branches for the other two -
-  Ben's instability.
+  Iterating the anchor works for HEF (12.3 km2 in 1901) and, with the bed
+  profile, for 00746 (run MB within the Hugonnet error for both); for KWF
+  it oscillates between two branches - Ben's instability.
 
-The bed instead of the surface along the glacier helps a little (00746
-down to one root), Kesselwandferner keeps three. Qiang Sun's report (Nov
+The bed instead of the surface along the glacier helps (00746 down to one
+root and the terminus match now works for it), Kesselwandferner keeps three. Qiang Sun's report (Nov
 2026, HEF only, Oerlemans exponential fitted to the same profile, difference
 mapping) reaches the same conclusions; see README.
 

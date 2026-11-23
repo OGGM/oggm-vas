@@ -337,8 +337,10 @@ test glaciers (elevation bands, GSWP3-W5E5, `informed_threestep`):
   Kesselwandferner, none for RGI60-11.00746. Our start-area search assumes
   one solution and fails for two of the three.
 - Terrain profile anchored on the RGI glacier: the same feedback, weaker
-  and bounded. One solution for Hintereisferner, three each for the other
-  two. The search returns whichever it brackets first.
+  and bounded. With the bed along the glacier: one solution for
+  Hintereisferner and RGI60-11.00746, three for Kesselwandferner (with the
+  surface: three for 00746 too). The search returns whichever it brackets
+  first.
 
 Where this comes from:
 
@@ -352,9 +354,12 @@ Where this comes from:
   length lags the area, so the run does not have the geometry the mass
   balance was calibrated on. Moving the anchor (the length that sits on the
   observed terminus) until the run also hits the observed terminus works for
-  Hintereisferner; its 2000-2019 balance then lands within the Hugonnet error
-  without being fitted. For the two others the terminus error jumps over
-  zero where the start-area search changes branch, and there is no match.
+  Hintereisferner (anchor 1.08 L_0, 12.3 km2 in 1901, -1077 against
+  -1100 +- 172) and, with the bed, for 00746 (1.03 L_0, 18.9 km2, -696
+  against -708 +- 123); both balances land within the Hugonnet error
+  without being fitted. For Kesselwandferner the terminus error jumps over
+  zero where the start-area search changes branch, and there is no match
+  (with the surface, 00746 behaved the same).
 
 ## Comparison with Ben's MATLAB code
 
